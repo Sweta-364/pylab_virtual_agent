@@ -91,6 +91,16 @@ WEATHER_CITY=Patna
 - The returned text is spoken through Sarvam TTS in the language set by `SARVAM_TTS_LANGUAGE`.
 - If Ollama is unavailable, the assistant falls back gracefully with a friendly message.
 
+## Push-To-Talk (Whisper)
+
+- Click `ASK (Spacebar)` once to enter conversation mode.
+- Hold `SPACE` to record, release to transcribe with Whisper.
+- Whisper auto-detects language and translates to English before querying Ollama.
+- While the assistant is speaking, press `SPACE` to interrupt speech immediately.
+- The old text box + `Send` flow still works.
+
+On first Whisper usage, the model may download and can take a minute depending on network speed.
+
 ## Troubleshooting
 
 - **Ollama warning at startup**:

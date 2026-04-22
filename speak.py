@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import time
 
 import requests
 
@@ -74,52 +75,64 @@ def _generate_audio_bytes(text):
     return base64.b64decode(audios[0])
 
 
-def _play_wav_file(file_path):
+def _start_audio_process(file_path):
     system = platform.system()
 
     if system == "Windows":
         # Use built-in Windows SoundPlayer.
-        subprocess.run(
+        return subprocess.Popen(
             [
                 "powershell",
                 "-NoProfile",
                 "-Command",
                 f"(New-Object Media.SoundPlayer '{file_path}').PlaySync();",
             ],
-            check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return
 
     if system == "Darwin" and shutil.which("afplay"):
-        subprocess.run(
+        return subprocess.Popen(
             ["afplay", file_path],
-            check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return
 
     # Linux and other POSIX fallbacks.
     for player_cmd in (("aplay",), ("paplay",), ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet")):
         if shutil.which(player_cmd[0]):
-            subprocess.run(
+            return subprocess.Popen(
                 [*player_cmd, file_path],
-                check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            return
+    return None
 
 
-def _play_audio_bytes(audio_bytes):
+def _play_wav_file(file_path, stop_event=None):
+    process = _start_audio_process(file_path)
+    if process is None:
+        return False
+
+    while process.poll() is None:
+        if stop_event is not None and stop_event.is_set():
+            process.terminate()
+            time.sleep(0.1)
+            if process.poll() is None:
+                process.kill()
+            return False
+        time.sleep(0.05)
+
+    return True
+
+
+def _play_audio_bytes(audio_bytes, stop_event=None):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
         temp_audio.write(audio_bytes)
         temp_path = temp_audio.name
 
     try:
-        _play_wav_file(temp_path)
+        return _play_wav_file(temp_path, stop_event=stop_event)
     finally:
         try:
             os.remove(temp_path)
@@ -127,15 +140,20 @@ def _play_audio_bytes(audio_bytes):
             pass
 
 
-def speak(text):
+def speak(text, stop_event=None):
     if not text:
-        return
+        return False
+
+    if stop_event is not None and stop_event.is_set():
+        return False
 
     try:
         _load_local_env()
         audio_bytes = _generate_audio_bytes(text)
         if audio_bytes:
-            _play_audio_bytes(audio_bytes)
+            return _play_audio_bytes(audio_bytes, stop_event=stop_event)
     except Exception:
         # Keep assistant functional even when TTS backend/network is unavailable.
-        return
+        return False
+
+    return False

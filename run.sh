@@ -80,6 +80,10 @@ for module_name, package_name in required:
 
 required_packages = [
     ("pywhatkit", "PyWhatKit"),
+    ("openai-whisper", "openai-whisper"),
+    ("keyboard", "keyboard"),
+    ("pydub", "pydub"),
+    ("numpy", "numpy"),
 ]
 
 for package_key, package_name in required_packages:
