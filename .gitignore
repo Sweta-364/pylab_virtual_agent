@@ -1,0 +1,13 @@
+# Local secrets and env
+.vscode/
+.env
+conversation_history.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual envs
+venv/
+venv_py310_backup/
+.vscode/
