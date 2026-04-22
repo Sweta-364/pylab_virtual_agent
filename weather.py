@@ -1,21 +1,18 @@
-# my user agent is : Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36
-# print(r.html.find('title' , first= True).text) 
-# requests-html==0.10.0
-# lxml==4.9.1 (first install  this one)
+import os
 
-from requests_html import HTMLSession
-import spech_to_text
+import requests
+
 
 def Weather():
-    s  =  HTMLSession()
-    query = "patna"
-    url = f'https://www.google.com/search?q=weather+{query}'
-    r  = s.get(url , headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36'})
+    city = os.getenv("WEATHER_CITY", "Patna").strip() or "Patna"
+    url = f"https://wttr.in/{city}"
 
-    temp  = r.html.find('span#wob_tm' , first= True).text
-    unit = r.html.find('div.vk_bk.wob-unit span.wob_t' , first= True).text
-    desc  = r.html.find('span#wob_dc' , first= True).text
-    return temp+" "+unit+" "+ desc
-
-
-  
+    try:
+        response = requests.get(url, params={"format": "%t %C"}, timeout=10)
+        response.raise_for_status()
+        weather_text = response.text.strip()
+        if not weather_text:
+            return f"Unable to fetch weather for {city} right now."
+        return f"{city}: {weather_text}"
+    except Exception:
+        return f"Unable to fetch weather for {city} right now."

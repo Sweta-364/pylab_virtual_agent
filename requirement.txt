@@ -1,6 +1,8 @@
 pillow
-lxml==4.9.1
+lxml>=4.9.4,<5
 requests-html==0.10.0
-pyttsx3
-SpeechRecognition==3.8.1
-PyAudio==0.2.11
+SpeechRecognition>=3.10.0
+# Optional on Linux if portaudio dev headers are missing. Voice input gracefully degrades without it.
+PyAudio==0.2.14
+requests>=2.31.0
+ollama>=0.1.0
