@@ -2,9 +2,11 @@ import datetime
 import os
 import platform
 import subprocess
+import threading
 import webbrowser
 
 import conversation_manager
+import image_handler
 import ollama_handler
 import speak
 import weather
@@ -17,6 +19,32 @@ def _speak_and_return(message):
     return response
 
 
+def _generate_handwritten_image_async(response_text):
+    def _worker():
+        try:
+            image_path = image_handler.convert_text_to_handwritten_image(response_text)
+            if ollama_handler.should_log_failures():
+                print(f"[HANDWRITING] Saved: {image_path}")
+        except Exception as exc:
+            if ollama_handler.should_log_failures():
+                print(f"[HANDWRITING] {exc}")
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+
+def _query_ollama_and_handle(user_text, history_before_message, is_createfile_command):
+    ollama_response = ollama_handler.query_ollama(
+        user_text,
+        history_before_message,
+    )
+
+    if is_createfile_command:
+        _generate_handwritten_image_async(ollama_response)
+
+    return ollama_response
+
+
 def Action(send):
     user_text = str(send or "").strip()
     if not user_text:
@@ -25,6 +53,7 @@ def Action(send):
     history_before_message = conversation_manager.get_history()
     conversation_manager.add_user_message(user_text)
     data_btn = user_text.lower()
+    is_createfile_command = "createfile" in data_btn
 
     if "what is your name" in data_btn:
         return _speak_and_return("my name is virtual Assistant")
@@ -91,9 +120,10 @@ def Action(send):
 
     else:
         try:
-            ollama_response = ollama_handler.query_ollama(
+            ollama_response = _query_ollama_and_handle(
                 user_text,
                 history_before_message,
+                is_createfile_command,
             )
             return _speak_and_return(ollama_response)
         except Exception as exc:

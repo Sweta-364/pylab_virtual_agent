@@ -59,6 +59,7 @@ install_deps_if_missing() {
   local missing
   missing="$("$PYTHON_BIN" - <<'PY'
 import importlib
+import importlib.metadata
 import sys
 
 required = [
@@ -75,6 +76,16 @@ for module_name, package_name in required:
     try:
         importlib.import_module(module_name)
     except Exception:
+        missing.append(package_name)
+
+required_packages = [
+    ("pywhatkit", "PyWhatKit"),
+]
+
+for package_key, package_name in required_packages:
+    try:
+        importlib.metadata.version(package_key)
+    except importlib.metadata.PackageNotFoundError:
         missing.append(package_name)
 
 if missing:

@@ -6,3 +6,4 @@ SpeechRecognition>=3.10.0
 PyAudio==0.2.14
 requests>=2.31.0
 ollama>=0.1.0
+PyWhatKit>=5.4,<6
