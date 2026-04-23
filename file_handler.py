@@ -141,6 +141,13 @@ def resolve_user_path(path_text: str, base_path: Optional[str] = None) -> str:
     if alias_path is not None:
         return str(alias_path.resolve())
 
+    lowered_raw = raw_text.lower()
+    for alias_name, alias_root in _LOCATION_ALIASES.items():
+        prefix = alias_name.lower() + "/"
+        if lowered_raw.startswith(prefix):
+            suffix = raw_text[len(alias_name):].lstrip("/\\")
+            return str((alias_root / suffix).resolve())
+
     base_resolved = None
     if base_path:
         base_resolved = Path(resolve_user_path(base_path))
@@ -537,6 +544,10 @@ def _parse_nested_create_command(command_text: str) -> Optional[Dict[str, object
     normalized = _normalize_phrase(command_text)
     lowered = normalized.lower()
     if "create" not in lowered or "folder" not in lowered or "file" not in lowered:
+        return None
+    if "inside" not in lowered:
+        return None
+    if "another folder" not in lowered and lowered.count("folder") < 2:
         return None
 
     base_location = None

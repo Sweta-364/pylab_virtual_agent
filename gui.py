@@ -124,6 +124,8 @@ def _manual_request_worker(user_text):
         bot = action.Action(user_text)
         if bot is not None:
             _append_text_from_thread("Bot <-- " + str(bot))
+            if bool(getattr(bot, "no_speech", False)):
+                _conversation_status("Text-only response ready.")
         if bot == "ok sir":
             root.after(0, _shutdown_and_close)
     finally:

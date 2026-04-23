@@ -15,6 +15,10 @@ except Exception:
     keyboard = None
 
 
+QUALITY_MIN_DURATION_SECONDS = 0.45
+QUALITY_MIN_RMS = 0.002
+
+
 class PushToTalkRecorder:
     CHUNK = 1024
     FORMAT = pyaudio.paInt16
@@ -557,6 +561,61 @@ def get_recorder():
     if _RECORDER is None:
         _RECORDER = PushToTalkRecorder()
     return _RECORDER
+
+
+def get_audio_quality(audio_data, sample_rate=PushToTalkRecorder.TARGET_RATE):
+    if audio_data is None:
+        return {
+            "duration_seconds": 0.0,
+            "rms": 0.0,
+            "peak": 0.0,
+            "is_valid": False,
+            "message": "No audio captured. Try again.",
+        }
+
+    audio = np.asarray(audio_data, dtype=np.float32)
+    if audio.size == 0:
+        return {
+            "duration_seconds": 0.0,
+            "rms": 0.0,
+            "peak": 0.0,
+            "is_valid": False,
+            "message": "No audio captured. Try again.",
+        }
+
+    duration_seconds = float(audio.size) / float(sample_rate)
+    peak = float(np.max(np.abs(audio)))
+    rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float32)))
+
+    if duration_seconds < QUALITY_MIN_DURATION_SECONDS:
+        return {
+            "duration_seconds": duration_seconds,
+            "rms": rms,
+            "peak": peak,
+            "is_valid": False,
+            "message": f"Audio too short ({duration_seconds:.2f}s). Please hold SPACE a bit longer.",
+        }
+
+    if rms < QUALITY_MIN_RMS:
+        return {
+            "duration_seconds": duration_seconds,
+            "rms": rms,
+            "peak": peak,
+            "is_valid": False,
+            "message": f"Audio too quiet (RMS={rms:.5f}). Please speak clearly.",
+        }
+
+    return {
+        "duration_seconds": duration_seconds,
+        "rms": rms,
+        "peak": peak,
+        "is_valid": True,
+        "message": "Audio looks good.",
+    }
+
+
+def is_audio_valid(audio_data, sample_rate=PushToTalkRecorder.TARGET_RATE):
+    return bool(get_audio_quality(audio_data, sample_rate=sample_rate).get("is_valid"))
 
 
 def listen_while_spacebar_held(is_pressed_fn=None):

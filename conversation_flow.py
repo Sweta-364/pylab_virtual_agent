@@ -62,6 +62,14 @@ class ConversationManager:
                     break
                 continue
 
+            audio_quality = push_to_talk.get_audio_quality(audio)
+            if not audio_quality.get("is_valid", False):
+                self._notify(
+                    on_status,
+                    audio_quality.get("message", "Audio too quiet or too short. Please try again."),
+                )
+                continue
+
             self._notify(on_status, "Transcribing with Whisper...")
             transcription = whisper_handler.transcribe_with_translation(audio)
             if not transcription.get("success"):

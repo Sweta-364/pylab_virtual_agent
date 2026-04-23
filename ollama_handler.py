@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     from ollama import Client
@@ -83,12 +83,12 @@ def _ollama_timeout() -> float:
         return 30.0
 
 
-def _get_client():
+def _get_client(timeout_override: Optional[float] = None):
     if Client is None:
         raise OllamaError("Python package 'ollama' is not installed.")
 
     host = _ollama_host()
-    timeout = _ollama_timeout()
+    timeout = timeout_override if timeout_override is not None else _ollama_timeout()
 
     try:
         return Client(host=host, timeout=timeout)
@@ -164,8 +164,12 @@ def get_ollama_setup_instructions() -> str:
     )
 
 
-def _build_messages(user_input: str, conversation_history: List[Dict[str, str]]):
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+def _build_messages(
+    user_input: str,
+    conversation_history: List[Dict[str, str]],
+    system_prompt: Optional[str] = None,
+):
+    messages = [{"role": "system", "content": system_prompt or _SYSTEM_PROMPT}]
 
     for item in conversation_history or []:
         if not isinstance(item, dict):
@@ -208,7 +212,12 @@ def _extract_chat_content(response) -> str:
     return ""
 
 
-def query_ollama(user_input: str, conversation_history: List[Dict[str, str]]) -> str:
+def query_ollama(
+    user_input: str,
+    conversation_history: List[Dict[str, str]],
+    system_prompt: Optional[str] = None,
+    timeout_override: Optional[float] = None,
+) -> str:
     if not _ollama_enabled():
         raise OllamaError("Ollama is disabled by environment configuration.")
 
@@ -217,10 +226,14 @@ def query_ollama(user_input: str, conversation_history: List[Dict[str, str]]) ->
         raise OllamaError("User input is empty.")
 
     try:
-        client = _get_client()
+        client = _get_client(timeout_override=timeout_override)
         response = client.chat(
             model=_ollama_model(),
-            messages=_build_messages(text, conversation_history),
+            messages=_build_messages(
+                text,
+                conversation_history,
+                system_prompt=system_prompt,
+            ),
         )
     except Exception as exc:
         raise OllamaError(f"Ollama query failed: {exc}") from exc
