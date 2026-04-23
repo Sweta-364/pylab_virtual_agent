@@ -6,18 +6,33 @@ import threading
 import webbrowser
 
 import conversation_manager
+import file_handler
 import image_handler
 import ollama_handler
 import speak
 import weather
 
 
-def _speak_and_return(message, should_speak=True, stop_event=None):
+class ActionResult(str):
+    def __new__(cls, value, no_speech=False):
+        obj = str.__new__(cls, value)
+        obj.no_speech = bool(no_speech)
+        return obj
+
+
+def _speak_and_return(
+    message,
+    should_speak=True,
+    stop_event=None,
+    record_history=True,
+    no_speech_output=False,
+):
     response = str(message)
-    conversation_manager.add_assistant_message(response)
+    if record_history:
+        conversation_manager.add_assistant_message(response)
     if should_speak:
         speak.speak(response, stop_event=stop_event)
-    return response
+    return ActionResult(response, no_speech=no_speech_output)
 
 
 def _generate_handwritten_image_async(response_text):
@@ -46,6 +61,35 @@ def _query_ollama_and_handle(user_text, history_before_message, is_createfile_co
     return ollama_response
 
 
+def _handle_file_operations(user_text, stop_event=None):
+    confirmation_response = file_handler.handle_pending_confirmation(user_text)
+    if confirmation_response is not None:
+        return _speak_and_return(
+            confirmation_response,
+            should_speak=False,
+            stop_event=stop_event,
+            record_history=False,
+            no_speech_output=True,
+        )
+
+    parsed_command = file_handler.parse_natural_language_command(user_text)
+    if not parsed_command:
+        return None
+
+    try:
+        result = file_handler.execute_parsed_command(parsed_command)
+    except Exception as exc:
+        result = str(exc)
+
+    return _speak_and_return(
+        result,
+        should_speak=False,
+        stop_event=stop_event,
+        record_history=False,
+        no_speech_output=True,
+    )
+
+
 def Action(send, speak_response=True, stop_event=None):
     user_text = str(send or "").strip()
     if not user_text:
@@ -55,10 +99,14 @@ def Action(send, speak_response=True, stop_event=None):
             stop_event=stop_event,
         )
 
-    history_before_message = conversation_manager.get_history()
-    conversation_manager.add_user_message(user_text)
     data_btn = user_text.lower()
     is_createfile_command = "createfile" in data_btn
+    file_response = _handle_file_operations(user_text, stop_event=stop_event)
+    if file_response is not None:
+        return file_response
+
+    history_before_message = conversation_manager.get_history()
+    conversation_manager.add_user_message(user_text)
 
     if "what is your name" in data_btn:
         return _speak_and_return(
@@ -67,7 +115,7 @@ def Action(send, speak_response=True, stop_event=None):
             stop_event=stop_event,
         )
 
-    elif "hello" in data_btn or "hye" in data_btn or "hay" in data_btn:
+    elif data_btn in {"hello", "hi", "hye", "hay", "hey"}:
         return _speak_and_return(
             "Hey sir, How i can  help you !",
             should_speak=speak_response,

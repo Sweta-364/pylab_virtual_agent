@@ -1,8 +1,4 @@
-# Virtual-Assistant-
-
-## Screenshots
-
-![project](https://user-images.githubusercontent.com/51821426/208213987-b66bfc6b-4dc5-43fe-9354-c247395a850f.jpg)
+# Virtual-Assistant
 
 ## Installation
 
@@ -101,6 +97,35 @@ WEATHER_CITY=Patna
 
 On first Whisper usage, the model may download and can take a minute depending on network speed.
 
+## Filesystem Commands
+
+JARVIS can now handle text-only filesystem operations without using TTS credits.
+
+- Example commands:
+  - `list files on desktop`
+  - `list all files in /home including hidden`
+  - `list only directories in /proc`
+  - `create folder test_folder on desktop`
+  - `create file notes.txt with content hello world on desktop`
+  - `create folder hello with file new.txt inside on desktop`
+  - `read ~/Desktop/notes.txt`
+  - `update ~/Desktop/notes.txt with content updated text`
+  - `append another line to ~/Desktop/notes.txt`
+  - `delete file ~/Desktop/notes.txt`
+
+- Notes:
+  - Delete operations always require confirmation.
+  - GUI `Yes` and `No` buttons appear for pending deletes.
+  - Directory listings are shown as trees by default.
+  - Large files are not loaded into memory; JARVIS shows the location or opens them with the system app when appropriate.
+  - All filesystem operations are logged to `file_operations.log`.
+
+## Security Notes
+
+- Filesystem commands can access paths across your machine, including absolute paths from `/`.
+- Relative parent traversal like `../..` is rejected in natural-language paths for safety.
+- Review delete confirmations carefully before approving them.
+
 ## Troubleshooting
 
 - **Ollama warning at startup**:
@@ -112,3 +137,5 @@ On first Whisper usage, the model may download and can take a minute depending o
   - Install at least one local audio player on Linux: `aplay`, `paplay`, or `ffplay`
 - **GUI does not open**:
   - Run from a desktop session with display access (Tkinter requires a working display)
+- **Filesystem commands do not speak**:
+  - This is intentional so file operations do not consume Sarvam TTS credits

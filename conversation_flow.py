@@ -93,12 +93,17 @@ class ConversationManager:
             bot_text = action.Action(user_text, speak_response=False)
             if bot_text is None:
                 continue
+            no_speech_output = bool(getattr(bot_text, "no_speech", False))
             bot_text = str(bot_text)
             self._notify(on_bot_text, bot_text)
 
             if bot_text.strip().lower() == "ok sir":
                 self.stop()
                 break
+
+            if no_speech_output:
+                self._notify(on_status, "Text-only response ready.")
+                continue
 
             interrupted = threading.Event()
             self._speak_stop.clear()

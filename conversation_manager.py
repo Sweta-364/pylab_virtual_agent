@@ -7,6 +7,7 @@ _BASE_DIR = os.path.dirname(__file__)
 _HISTORY: List[Dict[str, str]] = []
 _IS_INITIALIZED = False
 _ENV_LOADED = False
+_PENDING_FILE_OPERATION: Dict[str, str] = {}
 
 
 def _load_local_env() -> None:
@@ -167,7 +168,33 @@ def get_history() -> List[Dict[str, str]]:
     return [dict(item) for item in _HISTORY]
 
 
+def set_pending_file_operation(operation: Dict[str, str]) -> None:
+    global _PENDING_FILE_OPERATION
+    _initialize()
+    if not isinstance(operation, dict):
+        _PENDING_FILE_OPERATION = {}
+        return
+    _PENDING_FILE_OPERATION = dict(operation)
+
+
+def get_pending_file_operation() -> Dict[str, str]:
+    _initialize()
+    return dict(_PENDING_FILE_OPERATION)
+
+
+def has_pending_file_operation() -> bool:
+    _initialize()
+    return bool(_PENDING_FILE_OPERATION)
+
+
+def clear_pending_file_operation() -> None:
+    global _PENDING_FILE_OPERATION
+    _initialize()
+    _PENDING_FILE_OPERATION = {}
+
+
 def reset_history() -> None:
     _initialize()
     _HISTORY.clear()
+    clear_pending_file_operation()
     _save_history_if_enabled()
