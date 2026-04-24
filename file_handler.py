@@ -268,6 +268,9 @@ def _coerce_foreign_home_path(path: Path) -> Path:
         return path
 
     remainder = parts[3:]
+    alias_candidate = _LOCATION_ALIASES.get(parts[2].lower())
+    if alias_candidate is not None:
+        return alias_candidate.joinpath(*remainder)
     return current_home.joinpath(*remainder)
 
 
@@ -787,6 +790,33 @@ def _parse_nested_create_command(command_text: str) -> Optional[Dict[str, object
     }
 
 
+def _parse_descriptive_create_command(command_text: str) -> Optional[Dict[str, object]]:
+    normalized = _normalize_phrase(command_text)
+    match = re.match(
+        r'^create\s+(?:in|on|at|under)\s+(.+?),\s*(?:a|an)?\s*folder\s+(?:called|named)\s+(.+?)\s+'
+        r'in which there is\s+(?:a|an)?\s*file\s+(.+?)\s+in which there is\s+text\s+(.+)$',
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    base_location = _strip_quotes(match.group(1))
+    folder_name = _strip_quotes(match.group(2))
+    file_name = _strip_quotes(match.group(3))
+    content = _strip_quotes(match.group(4))
+
+    folder_path = resolve_user_path(folder_name, base_location)
+    file_path = resolve_user_path(file_name, folder_path)
+    return {
+        "operation": "batch_create",
+        "actions": [
+            {"create": "directory", "path": folder_path},
+            {"create": "file", "path": file_path, "content": content},
+        ],
+    }
+
+
 def _parse_create_file(command_text: str) -> Optional[Dict[str, object]]:
     stripped = re.sub(r"^(create|make|new)\s+file\s+", "", command_text, flags=re.IGNORECASE).strip()
     content = ""
@@ -893,6 +923,10 @@ def parse_natural_language_command(command) -> Dict[str, object]:
         return {}
 
     try:
+        descriptive_create_command = _parse_descriptive_create_command(normalized)
+        if descriptive_create_command:
+            return descriptive_create_command
+
         nested_create_command = _parse_nested_create_command(normalized)
         if nested_create_command:
             return nested_create_command
@@ -972,7 +1006,7 @@ def _execute_batch_create(actions: List[Dict[str, object]]) -> str:
     try:
         for action in actions:
             create_kind = str(action.get("create", "")).strip().lower()
-            path = Path(action["path"])
+            path = Path(resolve_user_path(str(action["path"])))
             attempted_paths.append(str(path))
 
             if create_kind == "directory":

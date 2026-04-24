@@ -7,6 +7,20 @@ import file_handler
 
 
 class FileHandlerTests(unittest.TestCase):
+    def test_descriptive_create_command_targets_actual_desktop(self):
+        command = (
+            'create in desktop of this pc, a folder called "hello" '
+            'in which there is a file new.txt in which there is text "hello world"'
+        )
+
+        parsed = file_handler.parse_natural_language_command(command)
+
+        self.assertEqual(parsed["operation"], "batch_create")
+        self.assertEqual(len(parsed["actions"]), 2)
+        self.assertTrue(parsed["actions"][0]["path"].endswith("/Desktop/hello"))
+        self.assertTrue(parsed["actions"][1]["path"].endswith("/Desktop/hello/new.txt"))
+        self.assertEqual(parsed["actions"][1]["content"], "hello world")
+
     def test_delete_file_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -54,6 +68,10 @@ class FileHandlerTests(unittest.TestCase):
             self.assertFalse((temp_path / "notes").exists())
             self.assertFalse((temp_path / "notes" / "todo.txt").exists())
             self.assertTrue(existing_file.exists())
+
+    def test_resolve_user_path_recovers_bad_users_desktop_alias(self):
+        resolved = file_handler.resolve_user_path("/Users/desktop/hello")
+        self.assertTrue(resolved.endswith("/Desktop/hello"))
 
     def test_create_and_update_file_preserve_written_content(self):
         with tempfile.TemporaryDirectory() as temp_dir:
