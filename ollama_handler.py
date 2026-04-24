@@ -83,6 +83,11 @@ def _ollama_timeout() -> float:
         return 30.0
 
 
+def should_prewarm_ollama() -> bool:
+    _load_local_env()
+    return _to_bool(os.getenv("OLLAMA_PREWARM", "false"), default=False)
+
+
 def _get_client(timeout_override: Optional[float] = None):
     if Client is None:
         raise OllamaError("Python package 'ollama' is not installed.")
@@ -162,6 +167,24 @@ def get_ollama_setup_instructions() -> str:
         "To enable Ollama fallback: install Ollama, run 'ollama serve', "
         f"and download the model with 'ollama pull {target_model}'."
     )
+
+
+def prewarm_ollama(timeout_override: Optional[float] = 10.0) -> Tuple[bool, str]:
+    if not _ollama_enabled():
+        return False, "Ollama prewarm skipped because Ollama is disabled."
+
+    if not should_prewarm_ollama():
+        return False, "Ollama prewarm skipped (OLLAMA_PREWARM=false)."
+
+    try:
+        query_ollama(
+            user_input="Reply with only OK.",
+            conversation_history=[],
+            timeout_override=timeout_override,
+        )
+        return True, f"Prewarmed model '{_ollama_model()}'."
+    except Exception as exc:
+        return False, f"Ollama prewarm failed: {exc}"
 
 
 def _build_messages(

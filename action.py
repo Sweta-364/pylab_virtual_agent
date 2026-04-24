@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import json
+import logging
 import os
 import platform
 import re
@@ -19,15 +20,18 @@ _speak_module = None
 _weather_module = None
 _file_handler_module = None
 _image_handler_module = None
+_LOGGER = logging.getLogger(__name__)
+_CREATEFILE_PATTERN = re.compile(r"\bcreatefile\b", re.IGNORECASE)
 
 _RESPONSE_CACHE: Dict[str, Tuple[str, float]] = {}
 _RESPONSE_CACHE_TTL_SECONDS = 600
 
 
 class ActionResult(str):
-    def __new__(cls, value, no_speech=False):
+    def __new__(cls, value, no_speech=False, operation_id=None):
         obj = str.__new__(cls, value)
         obj.no_speech = bool(no_speech)
+        obj.operation_id = operation_id
         return obj
 
 
@@ -69,6 +73,15 @@ def _get_image_handler():
 
 def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _update_status(status_callback, message: str) -> None:
+    if status_callback is None:
+        return
+    try:
+        status_callback(str(message))
+    except Exception:
+        pass
 
 
 def _prune_response_cache() -> None:
@@ -114,36 +127,60 @@ def _speak_and_return(
     stop_event=None,
     record_history=True,
     no_speech_output=False,
+    operation_id=None,
+    status_callback=None,
 ):
     response = str(message)
     if record_history:
         conversation_manager.add_assistant_message(response)
     if should_speak:
+        _update_status(status_callback, "Speaking...")
         _get_speak().speak(response, stop_event=stop_event)
-    return ActionResult(response, no_speech=no_speech_output)
+    return ActionResult(response, no_speech=no_speech_output, operation_id=operation_id)
 
 
 def _generate_handwritten_image_async(response_text):
+    operation_id = conversation_manager.create_pending_operation(
+        "image",
+        source="createfile",
+        requested_text=str(response_text or ""),
+    )
+
     def _worker():
         try:
             image_handler = _get_image_handler()
             image_path = image_handler.convert_text_to_handwritten_image(response_text)
-            if ollama_handler.should_log_failures():
-                print(f"[HANDWRITING] Saved: {image_path}")
+            validation = conversation_manager.validate_generated_image(image_path)
+            if not validation.get("is_valid"):
+                raise RuntimeError(validation.get("error") or "Generated image failed validation.")
+            relative_path = os.path.relpath(image_path, os.path.dirname(__file__))
+            conversation_manager.update_pending_operation(
+                operation_id,
+                status="success",
+                result=image_path,
+                display_path=f"./{relative_path}",
+            )
+            _LOGGER.info("Handwriting image saved to %s", image_path)
         except Exception as exc:
-            if ollama_handler.should_log_failures():
-                print(f"[HANDWRITING] {exc}")
+            conversation_manager.update_pending_operation(
+                operation_id,
+                status="failed",
+                error=str(exc),
+            )
+            _LOGGER.warning("Handwriting generation failed: %s", exc)
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
+    return operation_id
 
 
 def _query_ollama_and_handle(user_text, history_before_message, is_createfile_command):
     cached_response = _get_cached_response(user_text, history_before_message)
     if cached_response is not None:
+        operation_id = None
         if is_createfile_command:
-            _generate_handwritten_image_async(cached_response)
-        return cached_response
+            operation_id = _generate_handwritten_image_async(cached_response)
+        return cached_response, operation_id
 
     ollama_response = ollama_handler.query_ollama(
         user_text,
@@ -151,32 +188,51 @@ def _query_ollama_and_handle(user_text, history_before_message, is_createfile_co
     )
     _cache_response(user_text, history_before_message, ollama_response)
 
+    operation_id = None
     if is_createfile_command:
-        _generate_handwritten_image_async(ollama_response)
+        operation_id = _generate_handwritten_image_async(ollama_response)
 
-    return ollama_response
+    return ollama_response, operation_id
 
 
-def _text_only_response(message, stop_event=None):
+def _text_only_response(message, stop_event=None, operation_id=None):
     return _speak_and_return(
         message,
         should_speak=False,
         stop_event=stop_event,
         record_history=False,
         no_speech_output=True,
+        operation_id=operation_id,
     )
 
 
-def _execute_parsed_file_command(parsed_command, stop_event=None):
+def _execute_parsed_file_command(parsed_command, stop_event=None, status_callback=None):
     file_handler = _get_file_handler()
+    operation_id = conversation_manager.create_pending_operation(
+        "file",
+        command=str(parsed_command.get("operation", "")),
+        path=str(parsed_command.get("path", "")),
+    )
     try:
+        _update_status(status_callback, "Executing file operation...")
         result = file_handler.execute_parsed_command(parsed_command)
+        status = "pending" if str(result).startswith("Confirm delete") else "success"
+        conversation_manager.update_pending_operation(
+            operation_id,
+            status=status,
+            result=result,
+        )
     except Exception as exc:
         result = str(exc)
-    return _text_only_response(result, stop_event=stop_event)
+        conversation_manager.update_pending_operation(
+            operation_id,
+            status="failed",
+            error=result,
+        )
+    return _text_only_response(result, stop_event=stop_event, operation_id=operation_id)
 
 
-def _handle_file_operations(user_text, stop_event=None, allow_intent_fallback=False):
+def _handle_file_operations(user_text, stop_event=None, allow_intent_fallback=False, status_callback=None):
     file_handler = _get_file_handler()
 
     confirmation_response = file_handler.handle_pending_confirmation(user_text)
@@ -185,18 +241,34 @@ def _handle_file_operations(user_text, stop_event=None, allow_intent_fallback=Fa
 
     parsed_command = file_handler.parse_natural_language_command(user_text)
     if parsed_command:
-        return _execute_parsed_file_command(parsed_command, stop_event=stop_event)
+        return _execute_parsed_file_command(
+            parsed_command,
+            stop_event=stop_event,
+            status_callback=status_callback,
+        )
 
     if not allow_intent_fallback:
         return None
 
     intent_result = intent_detector.detect_os_intent(user_text)
+    _LOGGER.info(
+        "Intent detection result: is_os_operation=%s confidence=%.2f source=%s error=%s",
+        intent_result.get("is_os_operation"),
+        float(intent_result.get("confidence", 0.0)),
+        intent_result.get("source", "unknown"),
+        intent_result.get("error"),
+    )
     if not intent_result.get("is_os_operation"):
         return None
+    _update_status(status_callback, "Detected OS operation...")
 
     interpreted_command = intent_detector.interpret_os_command(user_text)
     if interpreted_command:
-        return _execute_parsed_file_command(interpreted_command, stop_event=stop_event)
+        return _execute_parsed_file_command(
+            interpreted_command,
+            stop_event=stop_event,
+            status_callback=status_callback,
+        )
 
     return _text_only_response(
         "I recognized that as a filesystem request, but I could not interpret it safely. "
@@ -372,7 +444,14 @@ def _find_command_match(user_text: str) -> Tuple[Optional[str], Optional[Dict[st
     return best_match[0], best_match[1]
 
 
-def _handle_registry_command(command_name, command_meta, user_text, speak_response=True, stop_event=None):
+def _handle_registry_command(
+    command_name,
+    command_meta,
+    user_text,
+    speak_response=True,
+    stop_event=None,
+    status_callback=None,
+):
     conversation_manager.add_user_message(user_text)
 
     if command_name == "shutdown":
@@ -387,25 +466,33 @@ def _handle_registry_command(command_name, command_meta, user_text, speak_respon
         response,
         should_speak=speak_response,
         stop_event=stop_event,
+        status_callback=status_callback,
     )
 
 
-def Action(send, speak_response=True, stop_event=None):
+def Action(send, speak_response=True, stop_event=None, status_callback=None):
     user_text = _normalize_text(send)
     if not user_text:
         return _speak_and_return(
             "Please say something so I can help you.",
             should_speak=speak_response,
             stop_event=stop_event,
+            status_callback=status_callback,
         )
 
     data_btn = user_text.lower()
-    is_createfile_command = "createfile" in data_btn
+    is_createfile_command = bool(_CREATEFILE_PATTERN.search(data_btn))
+    _LOGGER.info(
+        "createfile keyword match=%s input=%r",
+        is_createfile_command,
+        user_text,
+    )
 
     direct_file_response = _handle_file_operations(
         user_text,
         stop_event=stop_event,
         allow_intent_fallback=False,
+        status_callback=status_callback,
     )
     if direct_file_response is not None:
         return direct_file_response
@@ -418,12 +505,14 @@ def Action(send, speak_response=True, stop_event=None):
             user_text,
             speak_response=speak_response,
             stop_event=stop_event,
+            status_callback=status_callback,
         )
 
     semantic_file_response = _handle_file_operations(
         user_text,
         stop_event=stop_event,
         allow_intent_fallback=True,
+        status_callback=status_callback,
     )
     if semantic_file_response is not None:
         return semantic_file_response
@@ -432,7 +521,8 @@ def Action(send, speak_response=True, stop_event=None):
     conversation_manager.add_user_message(user_text)
 
     try:
-        ollama_response = _query_ollama_and_handle(
+        _update_status(status_callback, "Generating response...")
+        ollama_response, operation_id = _query_ollama_and_handle(
             user_text,
             history_before_message,
             is_createfile_command,
@@ -441,6 +531,8 @@ def Action(send, speak_response=True, stop_event=None):
             ollama_response,
             should_speak=speak_response,
             stop_event=stop_event,
+            operation_id=operation_id,
+            status_callback=status_callback,
         )
     except Exception as exc:
         if ollama_handler.should_log_failures():
@@ -450,4 +542,5 @@ def Action(send, speak_response=True, stop_event=None):
         "I'm not able to understand that. Please try a specific command or rephrase.",
         should_speak=speak_response,
         stop_event=stop_event,
+        status_callback=status_callback,
     )

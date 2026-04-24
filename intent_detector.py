@@ -14,18 +14,21 @@ _INTENT_TIMEOUT_SECONDS = 5.0
 _COMMAND_TIMEOUT_SECONDS = 7.0
 
 _INTENT_SYSTEM_PROMPT = """You are a filesystem intent classifier.
-Answer with only "yes" or "no".
+Return only valid JSON with this schema:
+{"is_os_operation": true|false, "confidence": 0.0-1.0}
 
-Respond "yes" if the user is asking to interact with files, folders, paths, directories, the desktop, downloads, home folder, or OS file management.
-Respond "no" for greetings, weather, time, jokes, music playback, browsing, or general conversation.
+Set is_os_operation=true only when the user is clearly asking to interact with files, folders, paths, directories, or OS file management.
+Use higher confidence for explicit filesystem requests and lower confidence for ambiguous phrasing.
+Return confidence below 0.7 when unsure.
 
 Examples:
-- "list all files on desktop" -> yes
-- "show my documents" -> yes
-- "read /tmp/test.txt" -> yes
-- "create a folder named hello" -> yes
-- "what is the weather" -> no
-- "hello how are you" -> no
+- "list all files on desktop" -> {"is_os_operation": true, "confidence": 0.98}
+- "show my documents" -> {"is_os_operation": true, "confidence": 0.85}
+- "read /tmp/test.txt" -> {"is_os_operation": true, "confidence": 0.99}
+- "create a folder named hello" -> {"is_os_operation": true, "confidence": 0.96}
+- "what is the weather" -> {"is_os_operation": false, "confidence": 0.01}
+- "hello how are you" -> {"is_os_operation": false, "confidence": 0.01}
+- "create file space for storage" -> {"is_os_operation": false, "confidence": 0.15}
 """
 
 _COMMAND_SYSTEM_PROMPT = """You convert filesystem requests into JSON.
@@ -60,24 +63,68 @@ If the request is not clearly a filesystem request, return {}.
 """
 
 _HEURISTIC_OS_PATTERNS = (
-    r"\b(file|files|folder|folders|directory|directories|desktop|downloads|documents|path|paths)\b",
-    r"\b(create|make|list|show|read|open|delete|remove|update|append|write|edit|rename|move|copy)\b.*\b(file|folder|directory)\b",
-    r"(?:^|[\s])(/|~)",
+    r"\b(?:create|make|new|add|write|generate|save|store)\b",
+    r"\b(?:delete|remove|trash|rm|unlink)\b",
+    r"\b(?:read|open|view|show|display|list|ls|cat)\b",
+    r"\b(?:rename|move|copy|modify|update|change)\b",
+    r"(?:~|/|\\\\|\.\/|[A-Za-z]:)",
+    r"\b(?:file|folder|directory|document|documents|pdf|png|jpg|jpeg|text|desktop|downloads|path|paths)\b",
 )
+_NEGATIVE_HEURISTIC_PATTERNS = (
+    r"\bfile\s+space\b",
+    r"\bstorage\s+space\b",
+)
+_INTENT_CONFIDENCE_THRESHOLD = 0.7
 
 
 def _normalize_input(user_input: str) -> str:
     return " ".join(str(user_input or "").strip().split())
 
 
-def _cache_key(user_input: str) -> str:
+def _cache_key(user_input: str, include_time_bucket: bool = False) -> str:
     normalized = _normalize_input(user_input).lower()
+    if include_time_bucket:
+        bucket = int(time.time() // 60)
+        normalized = f"{normalized}|{bucket}"
     return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
 
-def _heuristic_is_os_operation(user_input: str) -> bool:
+def _heuristic_intent_result(user_input: str) -> Dict[str, object]:
     normalized = _normalize_input(user_input).lower()
-    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HEURISTIC_OS_PATTERNS)
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _NEGATIVE_HEURISTIC_PATTERNS):
+        return {"is_os_operation": False, "confidence": 0.5, "source": "heuristic"}
+
+    matches = {
+        "action": bool(re.search(_HEURISTIC_OS_PATTERNS[0], normalized, flags=re.IGNORECASE))
+        or bool(re.search(_HEURISTIC_OS_PATTERNS[1], normalized, flags=re.IGNORECASE))
+        or bool(re.search(_HEURISTIC_OS_PATTERNS[2], normalized, flags=re.IGNORECASE))
+        or bool(re.search(_HEURISTIC_OS_PATTERNS[3], normalized, flags=re.IGNORECASE)),
+        "path": bool(re.search(_HEURISTIC_OS_PATTERNS[4], normalized, flags=re.IGNORECASE)),
+        "file_keyword": bool(re.search(_HEURISTIC_OS_PATTERNS[5], normalized, flags=re.IGNORECASE)),
+    }
+
+    is_os_operation = bool(matches["path"] or matches["file_keyword"] or (matches["action"] and matches["file_keyword"]))
+    return {
+        "is_os_operation": is_os_operation,
+        "confidence": 0.5,
+        "source": "heuristic",
+        "heuristic_matches": matches,
+    }
+
+
+def _parse_intent_response(raw_response: str) -> Dict[str, object]:
+    parsed = json.loads(_extract_json_object(raw_response))
+    if not isinstance(parsed, dict):
+        raise ValueError("Intent classifier returned non-object JSON.")
+
+    confidence = float(parsed.get("confidence", 0.0))
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "is_os_operation": bool(parsed.get("is_os_operation", False)) and confidence >= _INTENT_CONFIDENCE_THRESHOLD,
+        "raw_is_os_operation": bool(parsed.get("is_os_operation", False)),
+        "confidence": confidence,
+        "source": "ollama",
+    }
 
 
 def _clear_expired_cache() -> None:
@@ -104,13 +151,14 @@ def detect_os_intent(user_input: str, timeout_seconds: float = _INTENT_TIMEOUT_S
             "error": "empty input",
         }
 
-    key = _cache_key(normalized)
+    key = _cache_key(normalized, include_time_bucket=True)
     cached = _INTENT_CACHE.get(key)
     if cached:
         result, _ = cached
         return {
             **result,
             "from_cache": True,
+            "source": result.get("source", "cache"),
             "response_time_ms": (time.time() - start) * 1000.0,
         }
 
@@ -120,20 +168,30 @@ def detect_os_intent(user_input: str, timeout_seconds: float = _INTENT_TIMEOUT_S
             conversation_history=[],
             system_prompt=_INTENT_SYSTEM_PROMPT,
             timeout_override=timeout_seconds,
-        ).strip().lower()
+        )
+        parsed = _parse_intent_response(response)
         result = {
-            "is_os_operation": response.startswith("yes"),
+            **parsed,
             "from_cache": False,
+            "threshold": _INTENT_CONFIDENCE_THRESHOLD,
             "response_time_ms": (time.time() - start) * 1000.0,
             "error": None,
         }
     except Exception as exc:
+        heuristic = _heuristic_intent_result(normalized)
         result = {
-            "is_os_operation": _heuristic_is_os_operation(normalized),
+            "is_os_operation": bool(heuristic.get("is_os_operation", False))
+            and float(heuristic.get("confidence", 0.0)) >= _INTENT_CONFIDENCE_THRESHOLD,
+            "raw_is_os_operation": bool(heuristic.get("is_os_operation", False)),
+            "confidence": float(heuristic.get("confidence", 0.5)),
             "from_cache": False,
+            "source": heuristic.get("source", "heuristic"),
+            "threshold": _INTENT_CONFIDENCE_THRESHOLD,
             "response_time_ms": (time.time() - start) * 1000.0,
             "error": str(exc),
         }
+        if "heuristic_matches" in heuristic:
+            result["heuristic_matches"] = heuristic["heuristic_matches"]
 
     _INTENT_CACHE[key] = (dict(result), time.time())
     return result

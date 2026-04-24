@@ -16,7 +16,10 @@ except Exception:
 
 
 QUALITY_MIN_DURATION_SECONDS = 0.45
-QUALITY_MIN_RMS = 0.002
+QUALITY_MIN_RMS = 0.003
+QUALITY_VAD_FRAME_MS = 20
+QUALITY_VAD_MIN_ACTIVE_RATIO = 0.30
+QUALITY_VAD_FRAME_RMS_THRESHOLD = 0.003
 
 
 class PushToTalkRecorder:
@@ -587,11 +590,22 @@ def get_audio_quality(audio_data, sample_rate=PushToTalkRecorder.TARGET_RATE):
     peak = float(np.max(np.abs(audio)))
     rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float32)))
 
+    frame_size = max(1, int(sample_rate * (QUALITY_VAD_FRAME_MS / 1000.0)))
+    frame_rms_values = []
+    for start in range(0, audio.size, frame_size):
+        frame = audio[start : start + frame_size]
+        if frame.size == 0:
+            continue
+        frame_rms_values.append(float(np.sqrt(np.mean(np.square(frame), dtype=np.float32))))
+    active_frames = sum(value > QUALITY_VAD_FRAME_RMS_THRESHOLD for value in frame_rms_values)
+    active_ratio = (float(active_frames) / float(len(frame_rms_values))) if frame_rms_values else 0.0
+
     if duration_seconds < QUALITY_MIN_DURATION_SECONDS:
         return {
             "duration_seconds": duration_seconds,
             "rms": rms,
             "peak": peak,
+            "vad_active_ratio": active_ratio,
             "is_valid": False,
             "message": f"Audio too short ({duration_seconds:.2f}s). Please hold SPACE a bit longer.",
         }
@@ -601,14 +615,29 @@ def get_audio_quality(audio_data, sample_rate=PushToTalkRecorder.TARGET_RATE):
             "duration_seconds": duration_seconds,
             "rms": rms,
             "peak": peak,
+            "vad_active_ratio": active_ratio,
             "is_valid": False,
             "message": f"Audio too quiet (RMS={rms:.5f}). Please speak clearly.",
+        }
+
+    if active_ratio < QUALITY_VAD_MIN_ACTIVE_RATIO:
+        return {
+            "duration_seconds": duration_seconds,
+            "rms": rms,
+            "peak": peak,
+            "vad_active_ratio": active_ratio,
+            "is_valid": False,
+            "message": (
+                "Audio did not contain enough speech activity. "
+                f"Active voice frames: {active_ratio:.0%}. Please speak more clearly."
+            ),
         }
 
     return {
         "duration_seconds": duration_seconds,
         "rms": rms,
         "peak": peak,
+        "vad_active_ratio": active_ratio,
         "is_valid": True,
         "message": "Audio looks good.",
     }

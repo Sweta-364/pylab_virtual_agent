@@ -15,6 +15,7 @@ pip install -r requirement.txt
 - `run.sh` auto-loads local `.env`, uses local `venv`, and installs missing dependencies if needed.
 - Hardcoded assistant commands continue to work exactly as before.
 - If a query does not match those commands, Ollama is used as a fallback.
+- Filesystem commands and handwriting generation fail gracefully instead of crashing the UI flow.
 
 ## Sarvam AI Voice Setup
 
@@ -53,10 +54,12 @@ OLLAMA_ENABLE=true
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_MODEL=mistral
 OLLAMA_TIMEOUT=30
+OLLAMA_PREWARM=false
 LOG_OLLAMA_FAILURES=true
 ```
 
 `run.sh` validates Ollama at startup and prints a warning if it is unavailable, but the app will still run.
+Set `OLLAMA_PREWARM=true` if you want the configured model warmed up during startup to reduce the first-response delay.
 
 ## Conversation Context
 
@@ -92,7 +95,8 @@ WEATHER_CITY=Patna
 - Click `ASK (Spacebar)` once to enter conversation mode.
 - Hold `SPACE` to record, release to transcribe with Whisper.
 - Whisper auto-detects language and translates to English before querying Ollama.
-- While the assistant is speaking, press `SPACE` to interrupt speech immediately.
+- Audio validation now checks duration, RMS, and simple voice activity so silence/background noise are less likely to trigger false positives.
+- While the assistant is speaking, press `SPACE` to interrupt speech with a short fade-out when direct audio playback is available.
 - The old text box + `Send` flow still works.
 
 On first Whisper usage, the model may download and can take a minute depending on network speed.
@@ -117,8 +121,26 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
   - Delete operations always require confirmation.
   - GUI `Yes` and `No` buttons appear for pending deletes.
   - Directory listings are shown as trees by default.
-  - Large files are not loaded into memory; JARVIS shows the location or opens them with the system app when appropriate.
+  - File writes now use atomic temp-file replacement to reduce partial updates.
+  - Deletes reject symlink targets and re-check the path immediately before deletion.
+  - Large files use a 100 MB preview cap. Bigger text files can be streamed internally instead of being loaded all at once.
   - All filesystem operations are logged to `file_operations.log`.
+
+## Handwriting Generation
+
+- Use the exact keyword `createfile` as a whole word to trigger handwriting generation.
+- `createfile poem` triggers handwriting generation.
+- `create file poem` does not trigger handwriting generation.
+- Generated images are saved to `./image/handwriting_<n>.jpg`.
+- The assistant tries the real third-party `pywhatkit.text_to_handwriting(...)` API first.
+- If PyWhatKit is unavailable, slow, or times out after 15 seconds, the assistant falls back to a local Pillow renderer.
+- When handwriting finishes quickly enough, the response includes `Image saved to ./image/...`.
+
+## Intent Routing
+
+- Semantic filesystem routing now expects classifier confidence of `0.7` or higher before treating a request as an OS/filesystem operation.
+- Lower-confidence or ambiguous requests fall back to the normal assistant response path.
+- Exact/direct filesystem commands still work without going through the confidence gate.
 
 ## Security Notes
 
@@ -134,8 +156,12 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
   - Run `ollama pull <model>` for the configured model
 - **No audio output**:
   - Verify `SARVAM_API_KEY` in `.env`
-  - Install at least one local audio player on Linux: `aplay`, `paplay`, or `ffplay`
+  - Direct PyAudio playback is preferred for smoother interruption; if that fails, install at least one local audio player on Linux: `aplay`, `paplay`, or `ffplay`
 - **GUI does not open**:
   - Run from a desktop session with display access (Tkinter requires a working display)
 - **Filesystem commands do not speak**:
   - This is intentional so file operations do not consume Sarvam TTS credits
+- **Handwriting output is missing**:
+  - Check the `image/` folder for `handwriting_<n>.jpg`
+  - If PyWhatKit import or generation fails, the assistant should fall back locally instead of crashing
+  - Very long text can make handwriting generation slower and may trigger the fallback path

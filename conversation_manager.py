@@ -1,6 +1,14 @@
 import json
 import os
+import threading
+import time
+import uuid
 from typing import Dict, List
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 
 _BASE_DIR = os.path.dirname(__file__)
@@ -8,6 +16,8 @@ _HISTORY: List[Dict[str, str]] = []
 _IS_INITIALIZED = False
 _ENV_LOADED = False
 _PENDING_FILE_OPERATION: Dict[str, str] = {}
+_PENDING_OPERATIONS: Dict[str, Dict[str, object]] = {}
+_OPERATIONS_LOCK = threading.Lock()
 
 
 def _load_local_env() -> None:
@@ -193,8 +203,152 @@ def clear_pending_file_operation() -> None:
     _PENDING_FILE_OPERATION = {}
 
 
+def create_pending_operation(operation_type: str, **metadata) -> str:
+    _initialize()
+    operation_id = uuid.uuid4().hex
+    now = time.time()
+    record = {
+        "id": operation_id,
+        "type": str(operation_type or "unknown"),
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+        "result": metadata.pop("result", None),
+        "error": metadata.pop("error", None),
+    }
+    if metadata:
+        record.update(metadata)
+    with _OPERATIONS_LOCK:
+        _PENDING_OPERATIONS[operation_id] = record
+    return operation_id
+
+
+def update_pending_operation(
+    operation_id: str,
+    *,
+    status: str = None,
+    result=None,
+    error: str = None,
+    **metadata,
+) -> Dict[str, object]:
+    _initialize()
+    with _OPERATIONS_LOCK:
+        record = dict(_PENDING_OPERATIONS.get(operation_id, {}))
+        if not record:
+            record = {
+                "id": operation_id,
+                "type": str(metadata.pop("type", "unknown")),
+                "created_at": time.time(),
+            }
+        if status is not None:
+            record["status"] = str(status)
+        if result is not None:
+            record["result"] = result
+        if error is not None:
+            record["error"] = str(error)
+        if metadata:
+            record.update(metadata)
+        record["updated_at"] = time.time()
+        _PENDING_OPERATIONS[operation_id] = record
+        return dict(record)
+
+
+def get_pending_operation(operation_id: str) -> Dict[str, object]:
+    _initialize()
+    with _OPERATIONS_LOCK:
+        return dict(_PENDING_OPERATIONS.get(operation_id, {}))
+
+
+def get_pending_operations() -> Dict[str, Dict[str, object]]:
+    _initialize()
+    with _OPERATIONS_LOCK:
+        return {key: dict(value) for key, value in _PENDING_OPERATIONS.items()}
+
+
+def wait_for_pending_operation(
+    operation_id: str,
+    timeout_seconds: float = 2.0,
+    poll_interval: float = 0.1,
+) -> Dict[str, object]:
+    _initialize()
+    deadline = time.time() + max(0.0, float(timeout_seconds))
+    while time.time() <= deadline:
+        record = get_pending_operation(operation_id)
+        if not record or record.get("status") in {"success", "failed"}:
+            return record
+        time.sleep(max(0.01, float(poll_interval)))
+    return get_pending_operation(operation_id)
+
+
+def clear_pending_operation(operation_id: str) -> None:
+    _initialize()
+    with _OPERATIONS_LOCK:
+        _PENDING_OPERATIONS.pop(operation_id, None)
+
+
+def clear_completed_operations(max_age_seconds: float = 300.0) -> None:
+    _initialize()
+    cutoff = time.time() - max(0.0, float(max_age_seconds))
+    with _OPERATIONS_LOCK:
+        expired = [
+            op_id
+            for op_id, record in _PENDING_OPERATIONS.items()
+            if record.get("status") in {"success", "failed"} and float(record.get("updated_at", 0.0)) <= cutoff
+        ]
+        for op_id in expired:
+            _PENDING_OPERATIONS.pop(op_id, None)
+
+
+def validate_generated_image(image_path: str) -> Dict[str, object]:
+    _initialize()
+    path = _resolve_path(str(image_path or ""))
+    result = {
+        "path": path,
+        "exists": False,
+        "is_valid": False,
+        "size": 0,
+        "error": None,
+    }
+
+    if not image_path:
+        result["error"] = "No image path provided."
+        return result
+
+    if not os.path.isfile(path):
+        result["error"] = f"Image not found at {path}"
+        return result
+
+    size = os.path.getsize(path)
+    result["exists"] = True
+    result["size"] = size
+    if size <= 0:
+        result["error"] = "Image file is empty."
+        return result
+
+    try:
+        with open(path, "rb") as image_file:
+            header = image_file.read(4)
+        if not header.startswith(b"\xff\xd8"):
+            result["error"] = "Generated image is not a valid JPEG file."
+            return result
+        if Image is not None:
+            with Image.open(path) as image:
+                image.verify()
+    except OSError as exc:
+        result["error"] = str(exc)
+        return result
+    except Exception as exc:
+        result["error"] = f"Image verification failed: {exc}"
+        return result
+
+    result["is_valid"] = True
+    return result
+
+
 def reset_history() -> None:
     _initialize()
     _HISTORY.clear()
     clear_pending_file_operation()
+    with _OPERATIONS_LOCK:
+        _PENDING_OPERATIONS.clear()
     _save_history_if_enabled()

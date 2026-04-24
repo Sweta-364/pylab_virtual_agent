@@ -116,14 +116,35 @@ def _finish_manual_request():
         pass
 
 
+def _resolve_pending_action_text(bot):
+    operation_id = getattr(bot, "operation_id", None)
+    if not operation_id:
+        return str(bot)
+
+    record = conversation_manager.wait_for_pending_operation(operation_id, timeout_seconds=2.0, poll_interval=0.1)
+    if not record:
+        return str(bot)
+
+    if record.get("type") == "image" and record.get("status") == "success":
+        display_path = record.get("display_path") or record.get("result")
+        return f"{str(bot)}\nImage saved to `{display_path}`"
+
+    if record.get("type") == "image" and record.get("status") == "failed":
+        error = record.get("error") or "Unknown handwriting error."
+        return f"{str(bot)}\nHandwriting generation failed gracefully: {error}"
+
+    return str(bot)
+
+
 def _manual_request_worker(user_text):
     manager = conversation_flow.get_conversation_manager()
     manager.begin_manual_turn()
     try:
         _conversation_status("Processing typed input...")
-        bot = action.Action(user_text)
+        bot = action.Action(user_text, status_callback=_set_status)
         if bot is not None:
-            _append_text_from_thread("Bot <-- " + str(bot))
+            resolved_text = _resolve_pending_action_text(bot)
+            _append_text_from_thread("Bot <-- " + resolved_text)
             if bool(getattr(bot, "no_speech", False)):
                 _conversation_status("Text-only response ready.")
         if bot == "ok sir":

@@ -6,8 +6,9 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 import conversation_manager
 
@@ -24,6 +25,8 @@ if not _LOGGER.handlers:
 
 _MAX_TREE_NODES = 300
 _MAX_PREVIEW_CHARS = 50000
+_DEFAULT_READ_MAX_SIZE_MB = 100
+_STREAM_CHUNK_BYTES = 1024 * 1024
 _OPENABLE_EXTENSIONS = {
     ".pdf",
     ".png",
@@ -84,6 +87,16 @@ _LOCATION_ALIASES = {
 }
 _YES_WORDS = {"yes", "y", "confirm", "confirmed", "ok", "okay", "proceed", "delete it"}
 _NO_WORDS = {"no", "n", "cancel", "stop", "abort", "don't", "do not"}
+_LOCATION_FILLER_PHRASES = (
+    "of this pc",
+    "of this computer",
+    "on this pc",
+    "on this computer",
+    "in this pc",
+    "in this computer",
+    "from this pc",
+    "from this computer",
+)
 
 
 def _log_operation(action: str, path: str, status: str, details: str = "") -> None:
@@ -91,6 +104,100 @@ def _log_operation(action: str, path: str, status: str, details: str = "") -> No
     if details:
         message += f" details={details!r}"
     _LOGGER.info(message)
+
+
+def _log_operation_start(action: str, path: str, details: str = "") -> None:
+    _log_operation(action, path, "started", details)
+
+
+def _log_operation_error(action: str, path: str, details: str = "") -> None:
+    _log_operation(action, path, "error", details)
+
+
+def _ensure_not_symlink(path: Path, action: str) -> None:
+    if os.path.islink(path):
+        raise PermissionError(f"Refusing to {action} symlink target: {path}")
+
+
+def _ensure_delete_permissions(path: Path) -> None:
+    parent = path.parent if path.parent != path else path
+    if not os.access(path, os.W_OK):
+        raise PermissionError(f"Write permission is required for {path}")
+    if not os.access(parent, os.W_OK):
+        raise PermissionError(f"Delete permission is required in {parent}")
+
+
+def _fsync_file(handle) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _write_temp_file(parent: Path, suffix: str = ".tmp") -> Path:
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=parent, prefix=".va_tmp_", suffix=suffix)
+    os.close(fd)
+    return Path(temp_path)
+
+
+def _atomic_create_file(path: Path, content: str) -> None:
+    temp_path = _write_temp_file(path.parent, suffix=path.suffix or ".tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write(str(content))
+            _fsync_file(handle)
+        os.link(temp_path, path)
+    except FileExistsError:
+        raise FileExistsError(f"File already exists at {path}")
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _atomic_replace_file(path: Path, content: str) -> None:
+    temp_path = _write_temp_file(path.parent, suffix=path.suffix or ".tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write(str(content))
+            _fsync_file(handle)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _rollback_on_failure(records: List[Dict[str, str]], failure_reason: str) -> List[str]:
+    rollback_messages: List[str] = []
+    for record in reversed(records):
+        path = Path(record["path"])
+        record_type = record.get("type", "file")
+        try:
+            if not path.exists():
+                rollback_messages.append(f"Skipped rollback for missing {record_type}: {path}")
+                continue
+            if record_type == "directory":
+                path.rmdir()
+            else:
+                path.unlink()
+            rollback_messages.append(f"Rolled back {record_type}: {path}")
+        except Exception as exc:
+            rollback_messages.append(f"Failed to roll back {record_type} {path}: {exc}")
+            _log_operation_error("rollback", str(path), f"{failure_reason}; rollback_error={exc}")
+    return rollback_messages
+
+
+def _stream_file_chunks(path: Path, chunk_size: int = _STREAM_CHUNK_BYTES) -> Iterator[str]:
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
 
 def _strip_quotes(value: str) -> str:
@@ -118,8 +225,17 @@ def _normalize_phrase(text: str) -> str:
     return " ".join(str(text or "").strip().split())
 
 
+def _normalize_location_text(text: str) -> str:
+    normalized = _normalize_phrase(text)
+    lowered = normalized.lower()
+    for filler in _LOCATION_FILLER_PHRASES:
+        lowered = re.sub(rf"\b{re.escape(filler)}\b", "", lowered, flags=re.IGNORECASE)
+    lowered = re.sub(r"\s+", " ", lowered).strip(" ,.")
+    return lowered
+
+
 def _looks_like_path_reference(text: str) -> bool:
-    lowered = _normalize_phrase(text).lower()
+    lowered = _normalize_location_text(text)
     if not lowered:
         return False
     if lowered in _LOCATION_ALIASES:
@@ -131,33 +247,60 @@ def _looks_like_path_reference(text: str) -> bool:
 
 
 def _resolve_location_alias(location_text: str) -> Optional[Path]:
-    lowered = _normalize_phrase(location_text).lower()
+    lowered = _normalize_location_text(location_text)
     return _LOCATION_ALIASES.get(lowered)
 
 
-def resolve_user_path(path_text: str, base_path: Optional[str] = None) -> str:
+def _coerce_foreign_home_path(path: Path) -> Path:
+    current_home = Path.home()
+    parts = path.parts
+    if len(parts) < 2:
+        return path
+
+    if path == Path("/Users") or path == Path("/home"):
+        return current_home
+
+    foreign_home_root = None
+    if len(parts) >= 3 and parts[0] == "/" and parts[1] in {"Users", "home"}:
+        foreign_home_root = Path(parts[0], parts[1], parts[2])
+
+    if foreign_home_root is None or foreign_home_root == current_home:
+        return path
+
+    remainder = parts[3:]
+    return current_home.joinpath(*remainder)
+
+
+def _finalize_path(path: Path, follow_symlinks: bool = True) -> Path:
+    if follow_symlinks:
+        return path.resolve()
+    return Path(os.path.abspath(path))
+
+
+def resolve_user_path(path_text: str, base_path: Optional[str] = None, follow_symlinks: bool = True) -> str:
     raw_text = _sanitize_path_text(path_text)
     alias_path = _resolve_location_alias(raw_text)
     if alias_path is not None:
-        return str(alias_path.resolve())
+        return str(_finalize_path(alias_path, follow_symlinks=follow_symlinks))
 
     lowered_raw = raw_text.lower()
     for alias_name, alias_root in _LOCATION_ALIASES.items():
         prefix = alias_name.lower() + "/"
         if lowered_raw.startswith(prefix):
             suffix = raw_text[len(alias_name):].lstrip("/\\")
-            return str((alias_root / suffix).resolve())
+            return str(_finalize_path(alias_root / suffix, follow_symlinks=follow_symlinks))
 
     base_resolved = None
     if base_path:
-        base_resolved = Path(resolve_user_path(base_path))
+        base_resolved = Path(resolve_user_path(base_path, follow_symlinks=follow_symlinks))
 
     expanded = Path(os.path.expanduser(raw_text))
     if expanded.is_absolute():
-        return str(expanded.resolve())
+        expanded = _coerce_foreign_home_path(expanded)
+        return str(_finalize_path(expanded, follow_symlinks=follow_symlinks))
     if base_resolved is not None:
-        return str((base_resolved / expanded).resolve())
-    return str((Path.cwd() / expanded).resolve())
+        return str(_finalize_path(base_resolved / expanded, follow_symlinks=follow_symlinks))
+    return str(_finalize_path(Path.cwd() / expanded, follow_symlinks=follow_symlinks))
 
 
 def _human_size(size: int) -> str:
@@ -311,8 +454,9 @@ def open_file_with_default_app(file_path) -> str:
     return f"Opened {resolved} with the default system app."
 
 
-def read_file_content(file_path, max_size_mb: int = 10) -> str:
+def read_file_content(file_path, max_size_mb: int = _DEFAULT_READ_MAX_SIZE_MB, streaming: bool = False):
     resolved = Path(resolve_user_path(file_path))
+    _log_operation_start("read", str(resolved), f"streaming={streaming} max_size_mb={max_size_mb}")
     if not resolved.exists():
         raise FileNotFoundError(f"File not found at {resolved}")
     if resolved.is_dir():
@@ -321,6 +465,9 @@ def read_file_content(file_path, max_size_mb: int = 10) -> str:
     file_size = resolved.stat().st_size
     max_bytes = max_size_mb * 1024 * 1024
     if file_size > max_bytes:
+        if streaming and _detect_text_file(resolved) and resolved.suffix.lower() not in _OPENABLE_EXTENSIONS:
+            _log_operation("read", str(resolved), "streaming", f"size={file_size}")
+            return _stream_file_chunks(resolved)
         _log_operation("read", str(resolved), "large_file", f"size={file_size}")
         return f"File is too large to display ({_human_size(file_size)}). Location: {resolved}"
 
@@ -339,6 +486,7 @@ def read_file_content(file_path, max_size_mb: int = 10) -> str:
 
 def create_file(file_path, content: str = "") -> str:
     resolved = Path(resolve_user_path(file_path))
+    _log_operation_start("create_file", str(resolved), f"bytes={len(str(content))}")
     if resolved.exists() and resolved.is_dir():
         raise IsADirectoryError(f"{resolved} is a directory.")
 
@@ -346,8 +494,11 @@ def create_file(file_path, content: str = "") -> str:
     if resolved.exists():
         raise FileExistsError(f"File already exists at {resolved}")
 
-    with open(resolved, "w", encoding="utf-8") as handle:
-        handle.write(str(content))
+    try:
+        _atomic_create_file(resolved, str(content))
+    except Exception as exc:
+        _log_operation_error("create_file", str(resolved), str(exc))
+        raise
 
     _log_operation("create_file", str(resolved), "success", f"bytes={len(str(content))}")
     return f"Created file: {resolved}"
@@ -355,6 +506,7 @@ def create_file(file_path, content: str = "") -> str:
 
 def create_directory(dir_path) -> str:
     resolved = Path(resolve_user_path(dir_path))
+    _log_operation_start("create_directory", str(resolved))
     if resolved.exists():
         if resolved.is_dir():
             return f"Directory already exists: {resolved}"
@@ -366,11 +518,14 @@ def create_directory(dir_path) -> str:
 
 
 def delete_file(file_path, require_confirm: bool = True) -> str:
-    resolved = Path(resolve_user_path(file_path))
+    resolved = Path(resolve_user_path(file_path, follow_symlinks=False))
+    _log_operation_start("delete_file", str(resolved), f"require_confirm={require_confirm}")
     if not resolved.exists():
         raise FileNotFoundError(f"File not found at {resolved}")
     if resolved.is_dir():
         raise IsADirectoryError(f"{resolved} is a directory, not a file.")
+    _ensure_not_symlink(resolved, "delete")
+    _ensure_delete_permissions(resolved)
 
     if require_confirm:
         conversation_manager.set_pending_file_operation(
@@ -382,18 +537,33 @@ def delete_file(file_path, require_confirm: bool = True) -> str:
         _log_operation("delete_file", str(resolved), "pending_confirmation")
         return f"Confirm delete file: {resolved}? Use Yes/No."
 
-    resolved.unlink()
+    try:
+        if not resolved.exists():
+            _log_operation("delete_file", str(resolved), "missing_before_unlink")
+            conversation_manager.clear_pending_file_operation()
+            return f"File already disappeared: {resolved}"
+        resolved.unlink()
+    except FileNotFoundError:
+        _log_operation("delete_file", str(resolved), "missing_during_unlink")
+        conversation_manager.clear_pending_file_operation()
+        return f"File already disappeared: {resolved}"
+    except Exception as exc:
+        _log_operation_error("delete_file", str(resolved), str(exc))
+        raise
     conversation_manager.clear_pending_file_operation()
     _log_operation("delete_file", str(resolved), "success")
     return f"Deleted file: {resolved}"
 
 
 def delete_directory(dir_path, recursive: bool = True, require_confirm: bool = True) -> str:
-    resolved = Path(resolve_user_path(dir_path))
+    resolved = Path(resolve_user_path(dir_path, follow_symlinks=False))
+    _log_operation_start("delete_directory", str(resolved), f"recursive={recursive} require_confirm={require_confirm}")
     if not resolved.exists():
         raise FileNotFoundError(f"Folder not found at {resolved}")
     if not resolved.is_dir():
         raise NotADirectoryError(f"{resolved} is not a directory.")
+    _ensure_not_symlink(resolved, "delete")
+    _ensure_delete_permissions(resolved)
 
     if require_confirm:
         conversation_manager.set_pending_file_operation(
@@ -406,10 +576,22 @@ def delete_directory(dir_path, recursive: bool = True, require_confirm: bool = T
         _log_operation("delete_directory", str(resolved), "pending_confirmation", f"recursive={recursive}")
         return f"Confirm delete folder: {resolved}? Use Yes/No."
 
-    if recursive:
-        shutil.rmtree(resolved)
-    else:
-        resolved.rmdir()
+    try:
+        if not resolved.exists():
+            _log_operation("delete_directory", str(resolved), "missing_before_delete", f"recursive={recursive}")
+            conversation_manager.clear_pending_file_operation()
+            return f"Directory already disappeared: {resolved}"
+        if recursive:
+            shutil.rmtree(resolved)
+        else:
+            resolved.rmdir()
+    except FileNotFoundError:
+        _log_operation("delete_directory", str(resolved), "missing_during_delete", f"recursive={recursive}")
+        conversation_manager.clear_pending_file_operation()
+        return f"Directory already disappeared: {resolved}"
+    except Exception as exc:
+        _log_operation_error("delete_directory", str(resolved), str(exc))
+        raise
     conversation_manager.clear_pending_file_operation()
     _log_operation("delete_directory", str(resolved), "success", f"recursive={recursive}")
     return f"Deleted directory: {resolved}"
@@ -417,28 +599,40 @@ def delete_directory(dir_path, recursive: bool = True, require_confirm: bool = T
 
 def update_file(file_path, content, append: bool = False, replace_line=None) -> str:
     resolved = Path(resolve_user_path(file_path))
+    _log_operation_start(
+        "update_file",
+        str(resolved),
+        f"append={append} replace_line={replace_line}",
+    )
     if not resolved.exists():
         raise FileNotFoundError(f"File not found at {resolved}")
     if resolved.is_dir():
         raise IsADirectoryError(f"{resolved} is a directory.")
 
-    if replace_line is not None:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.readlines()
-        line_number = int(replace_line)
-        if line_number < 1 or line_number > len(lines):
-            raise ValueError(f"Line {line_number} is out of range for {resolved}")
-        lines[line_number - 1] = str(content) + "\n"
-        with open(resolved, "w", encoding="utf-8") as handle:
-            handle.writelines(lines)
-        _log_operation("update_file", str(resolved), "success", f"replace_line={line_number}")
-        return f"Updated line {line_number} in {resolved}"
+    try:
+        if replace_line is not None:
+            with open(resolved, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+            line_number = int(replace_line)
+            if line_number < 1 or line_number > len(lines):
+                raise ValueError(f"Line {line_number} is out of range for {resolved}")
+            lines[line_number - 1] = str(content) + "\n"
+            _atomic_replace_file(resolved, "".join(lines))
+            _log_operation("update_file", str(resolved), "success", f"replace_line={line_number}")
+            return f"Updated line {line_number} in {resolved}"
 
-    mode = "a" if append else "w"
-    with open(resolved, mode, encoding="utf-8") as handle:
-        handle.write(str(content))
-        if append and not str(content).endswith("\n"):
-            handle.write("\n")
+        if append:
+            with open(resolved, "r", encoding="utf-8", errors="replace") as handle:
+                existing_content = handle.read()
+            new_content = existing_content + str(content)
+            if str(content) and not str(content).endswith("\n"):
+                new_content += "\n"
+            _atomic_replace_file(resolved, new_content)
+        else:
+            _atomic_replace_file(resolved, str(content))
+    except Exception as exc:
+        _log_operation_error("update_file", str(resolved), str(exc))
+        raise
 
     _log_operation("update_file", str(resolved), "success", f"append={append}")
     return f"{'Appended to' if append else 'Updated'} file: {resolved}"
@@ -619,8 +813,44 @@ def _parse_create_file(command_text: str) -> Optional[Dict[str, object]]:
 
 
 def _parse_create_directory(command_text: str) -> Optional[Dict[str, object]]:
-    stripped = re.sub(r"^(create|make|new)\s+(folder|directory|dir)\s+", "", command_text, flags=re.IGNORECASE).strip()
+    stripped = re.sub(
+        r"^(create|make|new)\s+(?:a|an)?\s*(folder|directory|dir)\s+",
+        "",
+        command_text,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    named_match = re.match(
+        r"^(?:named\s+)?(.+?)\s+(?:on|in|at|under)\s+(.+)$",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if named_match:
+        dir_name = _strip_quotes(named_match.group(1))
+        base_location = _strip_quotes(named_match.group(2))
+        if dir_name.lower().startswith("named "):
+            dir_name = _strip_quotes(dir_name[6:])
+        return {
+            "operation": "create_directory",
+            "path": resolve_user_path(dir_name, base_location),
+        }
+
+    reverse_named_match = re.match(
+        r"^(?:on|in|at|under)\s+(.+?)\s+named\s+(.+)$",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if reverse_named_match:
+        base_location = _strip_quotes(reverse_named_match.group(1))
+        dir_name = _strip_quotes(reverse_named_match.group(2))
+        return {
+            "operation": "create_directory",
+            "path": resolve_user_path(dir_name, base_location),
+        }
+
     dir_name, base_location = _split_target_and_base(stripped)
+    if dir_name.lower().startswith("named "):
+        dir_name = _strip_quotes(dir_name[6:])
     return {
         "operation": "create_directory",
         "path": resolve_user_path(dir_name, base_location),
@@ -698,7 +928,7 @@ def parse_natural_language_command(command) -> Dict[str, object]:
         if re.match(r"^(create|make|new)\s+file\b", lowered):
             return _parse_create_file(normalized) or {}
 
-        if re.match(r"^(create|make|new)\s+(folder|directory|dir)\b", lowered):
+        if re.match(r"^(create|make|new)\s+(?:a|an)?\s*(folder|directory|dir)\b", lowered):
             return _parse_create_directory(normalized) or {}
 
     except Exception as exc:
@@ -735,37 +965,52 @@ def handle_pending_confirmation(user_text: str) -> Optional[str]:
 
 
 def _execute_batch_create(actions: List[Dict[str, object]]) -> str:
-    created_paths: List[Path] = []
+    created_records: List[Dict[str, str]] = []
+    attempted_paths: List[str] = []
+    _log_operation_start("batch_create", "", f"actions={len(actions)}")
+
     try:
         for action in actions:
-            if action.get("create") == "directory":
-                path = Path(action["path"])
-                if not path.exists():
-                    path.mkdir(parents=True, exist_ok=False)
-                    created_paths.append(path)
-            elif action.get("create") == "file":
-                path = Path(action["path"])
-                path.parent.mkdir(parents=True, exist_ok=True)
+            create_kind = str(action.get("create", "")).strip().lower()
+            path = Path(action["path"])
+            attempted_paths.append(str(path))
+
+            if create_kind == "directory":
                 if path.exists():
-                    raise FileExistsError(f"File already exists at {path}")
-                with open(path, "w", encoding="utf-8") as handle:
-                    handle.write(str(action.get("content", "")))
-                created_paths.append(path)
-        summary = "\n".join(f"- {item}" for item in created_paths)
-        for item in created_paths:
-            _log_operation("batch_create", str(item), "success")
+                    raise FileExistsError(f"Directory already exists at {path}")
+                path.mkdir(parents=True, exist_ok=False)
+                created_records.append({"path": str(path), "type": "directory"})
+                _log_operation("batch_create", str(path), "success", "created=directory")
+                continue
+
+            if create_kind == "file":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_create_file(path, str(action.get("content", "")))
+                created_records.append({"path": str(path), "type": "file"})
+                _log_operation("batch_create", str(path), "success", "created=file")
+                continue
+
+            raise ValueError(f"Unsupported batch action: {create_kind}")
+
+        summary = "\n".join(f"- {record['path']}" for record in created_records)
         return "Created filesystem items:\n" + summary
     except Exception as exc:
-        for created in reversed(created_paths):
-            try:
-                if created.is_dir():
-                    created.rmdir()
-                else:
-                    created.unlink()
-            except Exception:
-                pass
-        _log_operation("batch_create", "", "error", str(exc))
-        raise
+        rollback_messages = _rollback_on_failure(created_records, str(exc))
+        _log_operation_error("batch_create", "", f"{exc}; attempted={attempted_paths}")
+        success_lines = [f"- {record['path']}" for record in created_records]
+        failure_lines = [
+            "Batch create failed.",
+            f"Reason: {exc}",
+        ]
+        if success_lines:
+            failure_lines.append("Created before rollback:")
+            failure_lines.extend(success_lines)
+        if rollback_messages:
+            failure_lines.append("Rollback:")
+            failure_lines.extend(f"- {message}" for message in rollback_messages)
+        failure_lines.append("Attempted paths:")
+        failure_lines.extend(f"- {item}" for item in attempted_paths)
+        return "\n".join(failure_lines)
 
 
 def execute_parsed_command(parsed_command: Dict[str, object]) -> str:

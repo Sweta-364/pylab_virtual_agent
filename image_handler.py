@@ -4,18 +4,16 @@ import re
 import tempfile
 import threading
 import textwrap
-from urllib.parse import quote_plus
-
-import requests
 from PIL import Image, ImageDraw, ImageFont
 
 
 _BASE_DIR = os.path.dirname(__file__)
 _IMAGE_DIR = os.path.join(_BASE_DIR, "image")
-_HANDWRITTEN_PATTERN = re.compile(r"^handwritten_(\d+)\.png$")
+_HANDWRITTEN_PATTERN = re.compile(r"^handwriting_(\d+)\.jpg$")
 _LONG_TEXT_WARN_LIMIT = 500
 _WRITE_LOCK = threading.Lock()
 _LOGGER = logging.getLogger(__name__)
+_PYWHATKIT_TIMEOUT_SECONDS = 15
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/freefont/FreeSerifItalic.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
@@ -30,37 +28,29 @@ _LINE_HEIGHT = 52
 _MAX_LINES = 140
 
 
-def _render_with_pywhatkit_api(text: str, save_to: str, rgb=(0, 0, 0)) -> None:
-    encoded_text = quote_plus(text)
-    url = (
-        "https://pywhatkit.herokuapp.com/handwriting"
-        f"?text={encoded_text}&rgb={rgb[0]},{rgb[1]},{rgb[2]}"
-    )
-    response = requests.get(url, timeout=30)
-    if response.status_code != 200:
-        raise RuntimeError(f"PyWhatKit API error: HTTP {response.status_code}")
-
-    with open(save_to, "wb") as file:
-        file.write(response.content)
-
-
 def _render_with_pywhatkit(text: str, save_to: str) -> None:
-    try:
-        import importlib
-        pywhatkit = importlib.import_module("pywhatkit")
-        pywhatkit.text_to_handwriting(text, save_to=save_to)
-    except ModuleNotFoundError as exc:
-        _LOGGER.warning(
-            "PyWhatKit package is not installed. Falling back to direct handwriting API."
+    import importlib
+
+    pywhatkit = importlib.import_module("pywhatkit")
+    failure = {}
+
+    def _worker():
+        try:
+            # This is the third-party PyWhatKit API, not a local helper.
+            pywhatkit.text_to_handwriting(text, save_to=save_to)
+        except Exception as exc:
+            failure["error"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout=_PYWHATKIT_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
+        raise TimeoutError(
+            f"PyWhatKit handwriting generation exceeded {_PYWHATKIT_TIMEOUT_SECONDS} seconds."
         )
-        _render_with_pywhatkit_api(text, save_to)
-    except Exception as exc:
-        # Some environments fail importing top-level pywhatkit due GUI side-effects.
-        _LOGGER.warning(
-            "PyWhatKit import/use failed (%s). Falling back to direct handwriting API.",
-            exc,
-        )
-        _render_with_pywhatkit_api(text, save_to)
+    if "error" in failure:
+        raise failure["error"]
 
 
 def _load_font(size: int = 40):
@@ -116,17 +106,26 @@ def _render_with_local_pillow(text: str, save_to: str) -> None:
         draw.text((x + 1, y + 1), line, fill=(48, 48, 48), font=font)
         draw.text((x, y), line, fill=(20, 20, 20), font=font)
 
-    image.save(save_to, format="PNG")
+    image.save(save_to, format="JPEG", quality=95)
 
 
 def _render_text_handwriting(text: str, save_to: str) -> None:
+    pywhatkit_path = f"{save_to}.pywhatkit"
     try:
-        _render_with_pywhatkit(text, save_to)
+        _render_with_pywhatkit(text, pywhatkit_path)
+        if not os.path.isfile(pywhatkit_path) or os.path.getsize(pywhatkit_path) == 0:
+            raise RuntimeError("PyWhatKit did not produce a valid image file.")
+        os.replace(pywhatkit_path, save_to)
     except Exception as exc:
         _LOGGER.warning(
-            "PyWhatKit API path failed (%s). Falling back to local Pillow renderer.",
+            "PyWhatKit handwriting path failed (%s). Falling back to local Pillow renderer.",
             exc,
         )
+        try:
+            if os.path.exists(pywhatkit_path):
+                os.remove(pywhatkit_path)
+        except OSError:
+            pass
         _render_with_local_pillow(text, save_to)
 
 
@@ -159,11 +158,11 @@ def convert_text_to_handwritten_image(text: str) -> str:
 
     with _WRITE_LOCK:
         index = _next_handwritten_index()
-        final_path = os.path.join(_IMAGE_DIR, f"handwritten_{index}.png")
+        final_path = os.path.join(_IMAGE_DIR, f"handwriting_{index}.jpg")
         fd, tmp_path = tempfile.mkstemp(
             dir=_IMAGE_DIR,
-            prefix=f".handwritten_{index}_",
-            suffix=".png",
+            prefix=f".handwriting_{index}_",
+            suffix=".jpg",
         )
         os.close(fd)
 

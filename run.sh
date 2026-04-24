@@ -121,11 +121,20 @@ launch_gui() {
 
 validate_ollama_startup() {
   "$PYTHON_BIN" - <<'PY' || true
-from ollama_handler import get_ollama_setup_instructions, validate_ollama_startup
+from ollama_handler import (
+    get_ollama_setup_instructions,
+    prewarm_ollama,
+    should_prewarm_ollama,
+    validate_ollama_startup,
+)
 
 ok, message = validate_ollama_startup()
 if ok:
     print(f"[Ollama] {message}")
+    if should_prewarm_ollama():
+        warmed, warm_message = prewarm_ollama()
+        prefix = "[Ollama]" if warmed else "[Ollama Warning]"
+        print(f"{prefix} {warm_message}")
 else:
     print(f"[Ollama Warning] {message}")
     print(get_ollama_setup_instructions())
