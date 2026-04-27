@@ -21,7 +21,7 @@ _weather_module = None
 _file_handler_module = None
 _image_handler_module = None
 _LOGGER = logging.getLogger(__name__)
-_CREATEFILE_PATTERN = re.compile(r"\bcreatefile\b", re.IGNORECASE)
+_HANDWRITING_PATTERN = re.compile(r"\b(handwriting|handwritten|write\s+by\s+hand)\b", re.IGNORECASE)
 
 _RESPONSE_CACHE: Dict[str, Tuple[str, float]] = {}
 _RESPONSE_CACHE_TTL_SECONDS = 600
@@ -142,7 +142,7 @@ def _speak_and_return(
 def _generate_handwritten_image_async(response_text):
     operation_id = conversation_manager.create_pending_operation(
         "image",
-        source="createfile",
+        source="handwriting",
         requested_text=str(response_text or ""),
     )
 
@@ -174,11 +174,11 @@ def _generate_handwritten_image_async(response_text):
     return operation_id
 
 
-def _query_ollama_and_handle(user_text, history_before_message, is_createfile_command):
+def _query_ollama_and_handle(user_text, history_before_message, is_handwriting_command):
     cached_response = _get_cached_response(user_text, history_before_message)
     if cached_response is not None:
         operation_id = None
-        if is_createfile_command:
+        if is_handwriting_command:
             operation_id = _generate_handwritten_image_async(cached_response)
         return cached_response, operation_id
 
@@ -189,7 +189,7 @@ def _query_ollama_and_handle(user_text, history_before_message, is_createfile_co
     _cache_response(user_text, history_before_message, ollama_response)
 
     operation_id = None
-    if is_createfile_command:
+    if is_handwriting_command:
         operation_id = _generate_handwritten_image_async(ollama_response)
 
     return ollama_response, operation_id
@@ -481,10 +481,10 @@ def Action(send, speak_response=True, stop_event=None, status_callback=None):
         )
 
     data_btn = user_text.lower()
-    is_createfile_command = bool(_CREATEFILE_PATTERN.search(data_btn))
+    is_handwriting_command = bool(_HANDWRITING_PATTERN.search(data_btn))
     _LOGGER.info(
-        "createfile keyword match=%s input=%r",
-        is_createfile_command,
+        "handwriting keyword match=%s input=%r",
+        is_handwriting_command,
         user_text,
     )
 
@@ -525,7 +525,7 @@ def Action(send, speak_response=True, stop_event=None, status_callback=None):
         ollama_response, operation_id = _query_ollama_and_handle(
             user_text,
             history_before_message,
-            is_createfile_command,
+            is_handwriting_command,
         )
         return _speak_and_return(
             ollama_response,

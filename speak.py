@@ -122,6 +122,10 @@ def _play_wav_file(file_path, stop_event=None):
     if process is None:
         return False
 
+    return _wait_for_process(process, stop_event=stop_event)
+
+
+def _wait_for_process(process, stop_event=None):
     while process.poll() is None:
         if stop_event is not None and stop_event.is_set():
             process.terminate()
@@ -132,6 +136,71 @@ def _play_wav_file(file_path, stop_event=None):
         time.sleep(0.05)
 
     return True
+
+
+def _start_system_tts_process(text):
+    system = platform.system()
+    clean_text = str(text)[:2500]
+
+    if system == "Windows":
+        escaped_text = str(clean_text).replace("'", "''")
+        command = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$s.Speak('{escaped_text}');"
+        )
+        return subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    if system == "Darwin" and shutil.which("say"):
+        return subprocess.Popen(
+            ["say", clean_text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    linux_commands = (
+        ("spd-say", "-w", clean_text),
+        ("espeak", clean_text),
+        ("festival", "--tts"),
+    )
+    for command in linux_commands:
+        if not shutil.which(command[0]):
+            continue
+        if command[0] == "festival":
+            process = subprocess.Popen(
+                list(command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            try:
+                process.stdin.write(clean_text)
+                process.stdin.close()
+            except Exception:
+                pass
+            return process
+        return subprocess.Popen(
+            list(command),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    return None
+
+
+def _speak_with_system_tts(text, stop_event=None):
+    try:
+        process = _start_system_tts_process(text)
+    except Exception:
+        return False
+    if process is None:
+        return False
+    return _wait_for_process(process, stop_event=stop_event)
 
 
 def _play_wav_bytes_with_pyaudio(audio_bytes, stop_event=None, fade_out_duration=0.5):
@@ -246,6 +315,6 @@ def speak(text, stop_event=None, fade_out_duration=0.5):
             )
     except Exception:
         # Keep assistant functional even when TTS backend/network is unavailable.
-        return False
+        pass
 
-    return False
+    return _speak_with_system_tts(text, stop_event=stop_event)

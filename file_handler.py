@@ -225,6 +225,26 @@ def _normalize_phrase(text: str) -> str:
     return " ".join(str(text or "").strip().split())
 
 
+def _normalize_command_text(text: str) -> str:
+    normalized = _normalize_phrase(text)
+    normalized = re.sub(r"^operating system operations?\.?\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(
+        r"^(?:hey\s+)?(?:jarvis|assistant)[, ]+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    ).strip()
+    normalized = re.sub(
+        r"^(?:please\s+)?(?:can|could|would)\s+you\s+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    ).strip()
+    normalized = re.sub(r"^please\s+", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = re.sub(r"\bcreatefile\b", "create file", normalized, flags=re.IGNORECASE)
+    return normalized
+
+
 def _normalize_location_text(text: str) -> str:
     normalized = _normalize_phrase(text)
     lowered = normalized.lower()
@@ -687,6 +707,20 @@ def _parse_read_command(command_text: str) -> Dict[str, object]:
     }
 
 
+def _parse_open_command(command_text: str) -> Dict[str, object]:
+    stripped = re.sub(
+        r"^(open|launch)\s+(?:the\s+)?(?:file|folder|directory)?\s*",
+        "",
+        command_text,
+        flags=re.IGNORECASE,
+    ).strip()
+    stripped = re.sub(r"\s+(?:file|folder|directory)$", "", stripped, flags=re.IGNORECASE).strip()
+    return {
+        "operation": "open",
+        "path": resolve_user_path(stripped),
+    }
+
+
 def _parse_info_command(command_text: str) -> Dict[str, object]:
     stripped = re.sub(r"^(info|details|show info for|show details for)\s+", "", command_text, flags=re.IGNORECASE).strip()
     return {
@@ -818,23 +852,40 @@ def _parse_descriptive_create_command(command_text: str) -> Optional[Dict[str, o
 
 
 def _parse_create_file(command_text: str) -> Optional[Dict[str, object]]:
-    stripped = re.sub(r"^(create|make|new)\s+file\s+", "", command_text, flags=re.IGNORECASE).strip()
+    stripped = re.sub(
+        r"^(create|make|new)\s+(?:a|an)?\s*file\s+",
+        "",
+        command_text,
+        flags=re.IGNORECASE,
+    ).strip()
+    stripped = re.sub(r"^(?:called|named)\s+", "", stripped, flags=re.IGNORECASE).strip()
     content = ""
-    if " with content " in stripped.lower():
-        parts = re.split(r"\s+with content\s+", stripped, maxsplit=1, flags=re.IGNORECASE)
-        file_part = parts[0]
-        rest = parts[1]
-        content_match = re.match(r"(.+?)(?:\s+(?:on|in|at)\s+(.+))?$", rest, flags=re.IGNORECASE)
-        content = _strip_quotes(content_match.group(1) if content_match else rest)
-        base_location = _strip_quotes(content_match.group(2) if content_match else "")
-        file_name = _strip_quotes(file_part)
+
+    content_match = re.search(
+        r"\s+(?:with\s+(?:content|text)|containing(?:\s+text)?|that\s+says)\s+(.+)$",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if content_match:
+        file_part = stripped[: content_match.start()].strip()
+        content_part = content_match.group(1).strip()
+        trailing_location = re.match(
+            r"(.+?)(?:\s+(?:on|in|at|under)\s+(.+))?$",
+            content_part,
+            flags=re.IGNORECASE,
+        )
+        content = _strip_quotes(trailing_location.group(1) if trailing_location else content_part)
+        base_location = _strip_quotes(trailing_location.group(2) if trailing_location else "")
+        file_name, inline_location = _split_target_and_base(file_part)
         return {
             "operation": "create_file",
-            "path": resolve_user_path(file_name, base_location or None),
+            "path": resolve_user_path(file_name, base_location or inline_location),
             "content": content,
         }
 
     file_name, base_location = _split_target_and_base(stripped)
+    if file_name.lower().startswith(("called ", "named ")):
+        file_name = _strip_quotes(re.sub(r"^(called|named)\s+", "", file_name, flags=re.IGNORECASE))
     return {
         "operation": "create_file",
         "path": resolve_user_path(file_name, base_location),
@@ -916,8 +967,7 @@ def _parse_update_command(command_text: str) -> Optional[Dict[str, object]]:
 
 
 def parse_natural_language_command(command) -> Dict[str, object]:
-    normalized = _normalize_phrase(command)
-    normalized = re.sub(r"^operating system operations?\.?\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = _normalize_command_text(command)
     lowered = normalized.lower()
     if not normalized:
         return {}
@@ -944,6 +994,17 @@ def parse_natural_language_command(command) -> Dict[str, object]:
             if lowered.startswith(("show content", "get content", "open file")) or _looks_like_path_reference(stripped_read):
                 return _parse_read_command(normalized)
 
+        if re.match(r"^(open|launch)\b", lowered):
+            stripped_open = re.sub(
+                r"^(open|launch)\s+(?:the\s+)?(?:file|folder|directory)?\s*",
+                "",
+                normalized,
+                flags=re.IGNORECASE,
+            ).strip()
+            stripped_open = re.sub(r"\s+(?:file|folder|directory)$", "", stripped_open, flags=re.IGNORECASE).strip()
+            if _looks_like_path_reference(stripped_open):
+                return _parse_open_command(normalized)
+
         if re.match(r"^(info|details|show info for|show details for)\b", lowered):
             stripped_info = re.sub(r"^(info|details|show info for|show details for)\s+", "", normalized, flags=re.IGNORECASE).strip()
             if _looks_like_path_reference(stripped_info):
@@ -959,7 +1020,7 @@ def parse_natural_language_command(command) -> Dict[str, object]:
             if update_command:
                 return update_command
 
-        if re.match(r"^(create|make|new)\s+file\b", lowered):
+        if re.match(r"^(create|make|new)\s+(?:a|an)?\s*file\b", lowered):
             return _parse_create_file(normalized) or {}
 
         if re.match(r"^(create|make|new)\s+(?:a|an)?\s*(folder|directory|dir)\b", lowered):
@@ -1065,6 +1126,8 @@ def execute_parsed_command(parsed_command: Dict[str, object]) -> str:
         )
     if operation == "read":
         return read_file_content(parsed_command["path"])
+    if operation == "open":
+        return open_file_with_default_app(parsed_command["path"])
     if operation == "info":
         info = get_file_info(parsed_command["path"])
         return "\n".join(

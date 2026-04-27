@@ -88,6 +88,7 @@ WEATHER_CITY=Patna
 - Known commands (`open google`, `youtube`, `weather`, `time now`, etc.) are handled by the existing command logic.
 - Unknown queries go to Ollama (`mistral`) with conversation history.
 - The returned text is spoken through Sarvam TTS in the language set by `SARVAM_TTS_LANGUAGE`.
+- If Sarvam is unavailable, JARVIS tries the local OS speech engine (`say`, `spd-say`, `espeak`, `festival`, or Windows SAPI) before giving up silently.
 - If Ollama is unavailable, the assistant falls back gracefully with a friendly message.
 
 ## Push-To-Talk (Whisper)
@@ -111,7 +112,10 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
   - `list only directories in /proc`
   - `create folder test_folder on desktop`
   - `create file notes.txt with content hello world on desktop`
+  - `createfile notes.txt with content hello world on desktop`
+  - `Jarvis, please create a file named notes.txt in documents`
   - `create folder hello with file new.txt inside on desktop`
+  - `open downloads folder`
   - `read ~/Desktop/notes.txt`
   - `update ~/Desktop/notes.txt with content updated text`
   - `append another line to ~/Desktop/notes.txt`
@@ -128,9 +132,9 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
 
 ## Handwriting Generation
 
-- Use the exact keyword `createfile` as a whole word to trigger handwriting generation.
-- `createfile poem` triggers handwriting generation.
-- `create file poem` does not trigger handwriting generation.
+- Use an explicit handwriting phrase to trigger handwriting image generation.
+- `create a handwriting poem` triggers handwriting generation.
+- `createfile notes.txt` creates a real file; it does not trigger handwriting generation.
 - Generated images are saved to `./image/handwriting_<n>.jpg`.
 - The assistant tries the real third-party `pywhatkit.text_to_handwriting(...)` API first.
 - If PyWhatKit is unavailable, slow, or times out after 15 seconds, the assistant falls back to a local Pillow renderer.
@@ -139,6 +143,7 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
 ## Intent Routing
 
 - Semantic filesystem routing now expects classifier confidence of `0.7` or higher before treating a request as an OS/filesystem operation.
+- If Ollama is unavailable, strong local heuristics still route clear PC work like file creation/listing/deletion to the filesystem handler.
 - Lower-confidence or ambiguous requests fall back to the normal assistant response path.
 - Exact/direct filesystem commands still work without going through the confidence gate.
 

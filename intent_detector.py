@@ -37,6 +37,7 @@ Return only valid JSON. No markdown. No explanation.
 Allowed operations:
 - list
 - read
+- open
 - info
 - create_file
 - create_directory
@@ -47,6 +48,7 @@ Allowed operations:
 Schema rules:
 - list: {"operation":"list","path":"...","include_hidden":false,"show_tree":true,"directories_only":false,"files_only":false}
 - read: {"operation":"read","path":"..."}
+- open: {"operation":"open","path":"..."}
 - info: {"operation":"info","path":"..."}
 - create_file: {"operation":"create_file","path":"...","content":"..."}
 - create_directory: {"operation":"create_directory","path":"..."}
@@ -73,6 +75,7 @@ _HEURISTIC_OS_PATTERNS = (
 _NEGATIVE_HEURISTIC_PATTERNS = (
     r"\bfile\s+space\b",
     r"\bstorage\s+space\b",
+    r"\b(?:story|poem|essay|paragraph|song|joke)\s+about\b",
 )
 _INTENT_CONFIDENCE_THRESHOLD = 0.7
 
@@ -92,7 +95,7 @@ def _cache_key(user_input: str, include_time_bucket: bool = False) -> str:
 def _heuristic_intent_result(user_input: str) -> Dict[str, object]:
     normalized = _normalize_input(user_input).lower()
     if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _NEGATIVE_HEURISTIC_PATTERNS):
-        return {"is_os_operation": False, "confidence": 0.5, "source": "heuristic"}
+        return {"is_os_operation": False, "confidence": 0.2, "source": "heuristic"}
 
     matches = {
         "action": bool(re.search(_HEURISTIC_OS_PATTERNS[0], normalized, flags=re.IGNORECASE))
@@ -103,10 +106,19 @@ def _heuristic_intent_result(user_input: str) -> Dict[str, object]:
         "file_keyword": bool(re.search(_HEURISTIC_OS_PATTERNS[5], normalized, flags=re.IGNORECASE)),
     }
 
-    is_os_operation = bool(matches["path"] or matches["file_keyword"] or (matches["action"] and matches["file_keyword"]))
+    is_os_operation = bool(matches["path"] or (matches["action"] and matches["file_keyword"]))
+    if matches["action"] and matches["file_keyword"]:
+        confidence = 0.9
+    elif matches["path"]:
+        confidence = 0.82
+    elif matches["file_keyword"]:
+        confidence = 0.62
+    else:
+        confidence = 0.2
+
     return {
         "is_os_operation": is_os_operation,
-        "confidence": 0.5,
+        "confidence": confidence,
         "source": "heuristic",
         "heuristic_matches": matches,
     }

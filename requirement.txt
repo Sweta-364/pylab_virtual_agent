@@ -6,7 +6,7 @@ SpeechRecognition>=3.10.0
 PyAudio==0.2.14
 requests>=2.31.0
 ollama>=0.1.0
-PyWhatKit>=7.0
+PyWhatKit>=5.4,<6
 openai-whisper>=20240314
 keyboard>=0.13.5
 pydub>=0.25.1

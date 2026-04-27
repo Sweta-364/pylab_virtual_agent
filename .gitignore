@@ -1,7 +1,13 @@
 # Local secrets and env
-.vscode/
 .env
 conversation_history.json
+
+# Local tooling / editor state
+.vscode/
+.codex
+
+# Runtime / generated logs
+file_operations.log
 
 # Python cache
 __pycache__/
@@ -10,4 +16,3 @@ __pycache__/
 # Virtual envs
 venv/
 venv_py310_backup/
-.vscode/
