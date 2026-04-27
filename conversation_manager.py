@@ -5,12 +5,6 @@ import time
 import uuid
 from typing import Dict, List
 
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-
-
 _BASE_DIR = os.path.dirname(__file__)
 _HISTORY: List[Dict[str, str]] = []
 _IS_INITIALIZED = False
@@ -297,52 +291,6 @@ def clear_completed_operations(max_age_seconds: float = 300.0) -> None:
         ]
         for op_id in expired:
             _PENDING_OPERATIONS.pop(op_id, None)
-
-
-def validate_generated_image(image_path: str) -> Dict[str, object]:
-    _initialize()
-    path = _resolve_path(str(image_path or ""))
-    result = {
-        "path": path,
-        "exists": False,
-        "is_valid": False,
-        "size": 0,
-        "error": None,
-    }
-
-    if not image_path:
-        result["error"] = "No image path provided."
-        return result
-
-    if not os.path.isfile(path):
-        result["error"] = f"Image not found at {path}"
-        return result
-
-    size = os.path.getsize(path)
-    result["exists"] = True
-    result["size"] = size
-    if size <= 0:
-        result["error"] = "Image file is empty."
-        return result
-
-    try:
-        with open(path, "rb") as image_file:
-            header = image_file.read(4)
-        if not header.startswith(b"\xff\xd8"):
-            result["error"] = "Generated image is not a valid JPEG file."
-            return result
-        if Image is not None:
-            with Image.open(path) as image:
-                image.verify()
-    except OSError as exc:
-        result["error"] = str(exc)
-        return result
-    except Exception as exc:
-        result["error"] = f"Image verification failed: {exc}"
-        return result
-
-    result["is_valid"] = True
-    return result
 
 
 def reset_history() -> None:

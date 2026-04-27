@@ -85,30 +85,6 @@ class ConversationManager:
         self._keyboard_hooks = []
         self._space_listener_available = False
 
-    @staticmethod
-    def _resolve_pending_action_text(bot):
-        operation_id = getattr(bot, "operation_id", None)
-        if not operation_id:
-            return str(bot)
-
-        record = conversation_manager.wait_for_pending_operation(
-            operation_id,
-            timeout_seconds=2.0,
-            poll_interval=0.1,
-        )
-        if not record:
-            return str(bot)
-
-        if record.get("type") == "image" and record.get("status") == "success":
-            display_path = record.get("display_path") or record.get("result")
-            return f"{str(bot)}\nImage saved to `{display_path}`"
-
-        if record.get("type") == "image" and record.get("status") == "failed":
-            error = record.get("error") or "Unknown handwriting error."
-            return f"{str(bot)}\nHandwriting generation failed gracefully: {error}"
-
-        return str(bot)
-
     def start_conversation(self, on_user_text=None, on_bot_text=None, on_status=None):
         self._conversation_stop.clear()
         self._speech_interrupted.clear()
@@ -178,7 +154,7 @@ class ConversationManager:
             if bot_text is None:
                 continue
             no_speech_output = bool(getattr(bot_text, "no_speech", False))
-            bot_text = self._resolve_pending_action_text(bot_text)
+            bot_text = str(bot_text)
             self._notify(on_bot_text, bot_text)
 
             if bot_text.strip().lower() == "ok sir":

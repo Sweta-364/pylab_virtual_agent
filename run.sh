@@ -79,7 +79,6 @@ for module_name, package_name in required:
         missing.append(package_name)
 
 required_packages = [
-    ("pywhatkit", "PyWhatKit"),
     ("openai-whisper", "openai-whisper"),
     ("keyboard", "keyboard"),
     ("pydub", "pydub"),

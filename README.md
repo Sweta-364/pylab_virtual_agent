@@ -15,7 +15,7 @@ pip install -r requirement.txt
 - `run.sh` auto-loads local `.env`, uses local `venv`, and installs missing dependencies if needed.
 - Hardcoded assistant commands continue to work exactly as before.
 - If a query does not match those commands, Ollama is used as a fallback.
-- Filesystem commands and handwriting generation fail gracefully instead of crashing the UI flow.
+- Filesystem commands fail gracefully instead of crashing the UI flow.
 
 ## Sarvam AI Voice Setup
 
@@ -130,16 +130,6 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
   - Large files use a 100 MB preview cap. Bigger text files can be streamed internally instead of being loaded all at once.
   - All filesystem operations are logged to `file_operations.log`.
 
-## Handwriting Generation
-
-- Use an explicit handwriting phrase to trigger handwriting image generation.
-- `create a handwriting poem` triggers handwriting generation.
-- `createfile notes.txt` creates a real file; it does not trigger handwriting generation.
-- Generated images are saved to `./image/handwriting_<n>.jpg`.
-- The assistant tries the real third-party `pywhatkit.text_to_handwriting(...)` API first.
-- If PyWhatKit is unavailable, slow, or times out after 15 seconds, the assistant falls back to a local Pillow renderer.
-- When handwriting finishes quickly enough, the response includes `Image saved to ./image/...`.
-
 ## Intent Routing
 
 - Semantic filesystem routing now expects classifier confidence of `0.7` or higher before treating a request as an OS/filesystem operation.
@@ -166,7 +156,3 @@ JARVIS can now handle text-only filesystem operations without using TTS credits.
   - Run from a desktop session with display access (Tkinter requires a working display)
 - **Filesystem commands do not speak**:
   - This is intentional so file operations do not consume Sarvam TTS credits
-- **Handwriting output is missing**:
-  - Check the `image/` folder for `handwriting_<n>.jpg`
-  - If PyWhatKit import or generation fails, the assistant should fall back locally instead of crashing
-  - Very long text can make handwriting generation slower and may trigger the fallback path

@@ -6,7 +6,6 @@ import os
 import platform
 import re
 import subprocess
-import threading
 import time
 import webbrowser
 from typing import Callable, Dict, List, Optional, Tuple
@@ -19,9 +18,7 @@ import ollama_handler
 _speak_module = None
 _weather_module = None
 _file_handler_module = None
-_image_handler_module = None
 _LOGGER = logging.getLogger(__name__)
-_HANDWRITING_PATTERN = re.compile(r"\b(handwriting|handwritten|write\s+by\s+hand)\b", re.IGNORECASE)
 
 _RESPONSE_CACHE: Dict[str, Tuple[str, float]] = {}
 _RESPONSE_CACHE_TTL_SECONDS = 600
@@ -60,15 +57,6 @@ def _get_file_handler():
 
         _file_handler_module = file_handler
     return _file_handler_module
-
-
-def _get_image_handler():
-    global _image_handler_module
-    if _image_handler_module is None:
-        import image_handler
-
-        _image_handler_module = image_handler
-    return _image_handler_module
 
 
 def _normalize_text(value: str) -> str:
@@ -139,60 +127,17 @@ def _speak_and_return(
     return ActionResult(response, no_speech=no_speech_output, operation_id=operation_id)
 
 
-def _generate_handwritten_image_async(response_text):
-    operation_id = conversation_manager.create_pending_operation(
-        "image",
-        source="handwriting",
-        requested_text=str(response_text or ""),
-    )
-
-    def _worker():
-        try:
-            image_handler = _get_image_handler()
-            image_path = image_handler.convert_text_to_handwritten_image(response_text)
-            validation = conversation_manager.validate_generated_image(image_path)
-            if not validation.get("is_valid"):
-                raise RuntimeError(validation.get("error") or "Generated image failed validation.")
-            relative_path = os.path.relpath(image_path, os.path.dirname(__file__))
-            conversation_manager.update_pending_operation(
-                operation_id,
-                status="success",
-                result=image_path,
-                display_path=f"./{relative_path}",
-            )
-            _LOGGER.info("Handwriting image saved to %s", image_path)
-        except Exception as exc:
-            conversation_manager.update_pending_operation(
-                operation_id,
-                status="failed",
-                error=str(exc),
-            )
-            _LOGGER.warning("Handwriting generation failed: %s", exc)
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    return operation_id
-
-
-def _query_ollama_and_handle(user_text, history_before_message, is_handwriting_command):
+def _query_ollama(user_text, history_before_message):
     cached_response = _get_cached_response(user_text, history_before_message)
     if cached_response is not None:
-        operation_id = None
-        if is_handwriting_command:
-            operation_id = _generate_handwritten_image_async(cached_response)
-        return cached_response, operation_id
+        return cached_response
 
     ollama_response = ollama_handler.query_ollama(
         user_text,
         history_before_message,
     )
     _cache_response(user_text, history_before_message, ollama_response)
-
-    operation_id = None
-    if is_handwriting_command:
-        operation_id = _generate_handwritten_image_async(ollama_response)
-
-    return ollama_response, operation_id
+    return ollama_response
 
 
 def _text_only_response(message, stop_event=None, operation_id=None):
@@ -480,14 +425,6 @@ def Action(send, speak_response=True, stop_event=None, status_callback=None):
             status_callback=status_callback,
         )
 
-    data_btn = user_text.lower()
-    is_handwriting_command = bool(_HANDWRITING_PATTERN.search(data_btn))
-    _LOGGER.info(
-        "handwriting keyword match=%s input=%r",
-        is_handwriting_command,
-        user_text,
-    )
-
     direct_file_response = _handle_file_operations(
         user_text,
         stop_event=stop_event,
@@ -522,16 +459,14 @@ def Action(send, speak_response=True, stop_event=None, status_callback=None):
 
     try:
         _update_status(status_callback, "Generating response...")
-        ollama_response, operation_id = _query_ollama_and_handle(
+        ollama_response = _query_ollama(
             user_text,
             history_before_message,
-            is_handwriting_command,
         )
         return _speak_and_return(
             ollama_response,
             should_speak=speak_response,
             stop_event=stop_event,
-            operation_id=operation_id,
             status_callback=status_callback,
         )
     except Exception as exc:
